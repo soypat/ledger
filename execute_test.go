@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"cmp"
 	"math"
 	"math/rand/v2"
 	"slices"
@@ -22,9 +23,20 @@ func accounts() (dr, cr Account) {
 // mustExecute fails t unless Execute accepts tr.
 func mustExecute(t *testing.T, tr *Transfer, dr, cr *Account, p *Transfer, status PendingStatus) {
 	t.Helper()
-	if code := Execute(tr, execTS, dr, cr, p, status); code != 0 {
+	if code := Execute(dr, cr, tr, p, status, execTS); code != 0 {
 		t.Fatalf("Execute(%+v) = %v", *tr, code)
 	}
+}
+
+type ExecuteTest struct {
+	name      string
+	dr, cr    Account
+	submitted Transfer
+	pending   *Transfer
+	status    PendingStatus // zero derives PendingActive when pending is a pending transfer
+	ts        int64         // ledger clock; zero derives one past every timestamp in the row
+	// Outcome.
+	wantCode ErrCode // No panic test here.
 }
 
 func TestExecute_table(t *testing.T) {
@@ -32,6 +44,7 @@ func TestExecute_table(t *testing.T) {
 		ledger = 7
 		idDeb  = 2
 		idCred = 3
+		idSub  = 4 // ID of the submitted transfer
 	)
 	account := func(id ID, ts int64, b Balance) Account {
 		return Account{
@@ -45,73 +58,202 @@ func TestExecute_table(t *testing.T) {
 	B := func() Balance {
 		return Balance{}
 	}
+	// sub returns a plain transfer of 100 from the debit to the credit account.
 	sub := func() Transfer {
-
+		return Transfer{
+			ID:              idSub,
+			DebitAccountID:  idDeb,
+			CreditAccountID: idCred,
+			Amount:          100,
+			Ledger:          ledger,
+			Code:            1,
+		}
 	}
 
-	var tests = []struct {
-		name      string
-		dr, cr    Account
-		submitted Transfer
-		pending   *Transfer
-		status    PendingStatus // if status 0 then set to reasonable value based on what looks to be the operation being performed.
-		ts        int64
-		// Outcome.
-		wantCode ErrCode // No panic test here.
-		// Success.
-		// wantDebitorBalance  Balance
-		// wantCreditorBalance Balance
-	}{
+	var tests = []ExecuteTest{
 		{
 			name: "normal",
-			dr:   account(idDeb, 100, B()), cr: account(idDeb, 100, B()),
+			dr:   account(idDeb, 100, B()), cr: account(idCred, 100, B()),
 			submitted: sub(), pending: nil,
 		},
 	}
-	var auxpend Transfer
-	for _, test := range tests {
+	for i := range tests {
+		test := &tests[i]
 		t.Run(test.name, func(t *testing.T) {
-			dr := test.dr
-			cr := test.cr
-			sub := test.submitted
-			var pend *Transfer
-			if test.pending != nil {
-				auxpend = *test.pending
-				pend = &auxpend
-			}
-			ts := test.ts
-			if ts == 0 {
-				ts = 1
-			}
-			code := Execute(&dr, &cr, &sub, pend, test.status, ts)
-			if code != test.wantCode {
-				t.Errorf("want code %s, got %s", test.wantCode, code)
-				return
-			} else if code != 0 {
-				// Failed, check immutable
-				if dr != test.dr || cr != test.cr {
-					t.Error("on error immutable account promise broken")
-				}
-				if test.submitted != sub {
-					t.Error("on error immutable submitted promise broken")
-				}
-				if test.pending != nil && auxpend != *test.pending {
-					t.Error("on error immutable pending promise broken")
-				}
-				return
-			}
-			// Behavioural testing of values.
-			wantCrBalance := Balance{}
-			if wantCrBalance != cr.Balance {
-				t.Errorf("creditor balance mismatch\nwant:%+v\ngot :%+v", wantCrBalance, cr.Balance)
-			}
-			wantDrBalance := Balance{}
-			if wantDrBalance != dr.Balance {
-				t.Errorf("debitor balance mismatch\nwant:%+v\ngot :%+v", wantDrBalance, dr.Balance)
-			}
-			var wantCrFlagsSet, wantDrFlagsSet AccountFlags
-			// ... behavioural tests.
+			testAccountNoPanic(t, test)
 		})
+	}
+}
+
+func testAccountNoPanic(t *testing.T, test *ExecuteTest) {
+	dr := test.dr
+	cr := test.cr
+	sub := test.submitted
+	var auxpend Transfer
+	var pend *Transfer
+	if test.pending != nil {
+		auxpend = *test.pending
+		pend = &auxpend
+	}
+	ts := test.ts
+	if ts == 0 {
+		// The ledger clock is past every stored record and any imported timestamp.
+		ts = 1 + max(dr.Timestamp, cr.Timestamp, sub.Timestamp)
+		if pend != nil {
+			ts = max(ts, pend.Timestamp+1)
+		}
+	}
+	status := test.status
+	if status == PendingNone && pend != nil && pend.IsPending() {
+		status = PendingActive // a pending transfer not yet resolved
+	}
+	code := Execute(&dr, &cr, &sub, pend, status, ts)
+	if code != test.wantCode {
+		t.Errorf("want code %s, got %s", test.wantCode, code)
+		return
+	} else if code != 0 {
+		// Failed, check immutable
+		if dr != test.dr || cr != test.cr {
+			t.Error("on error immutable account promise broken")
+		}
+		if test.submitted != sub {
+			t.Error("on error immutable submitted promise broken")
+		}
+		if test.pending != nil && auxpend != *test.pending {
+			t.Error("on error immutable pending promise broken")
+		}
+		return
+	}
+	// Behavioural testing of values: on success everything follows from the row.
+	in, rec := test.submitted, sub // as submitted, as stored
+	isPending := in.IsPending()
+	isPost := in.Flags.Has(TransferPostPending)
+	isVoid := in.Flags.Has(TransferVoidPending)
+
+	// Amount is the only value Execute chooses.
+	wantAmount := in.Amount
+	if isVoid || isPost && in.Amount == AmountMax {
+		wantAmount = pend.Amount // a void releases it all; AmountMax posts it all
+	}
+	if in.Flags.Has(TransferBalancingDebit) {
+		room, ok := test.dr.DebitHeadroom()
+		if !ok {
+			t.Fatal("row: debit headroom does not fit an int64")
+		}
+		wantAmount = min(wantAmount, uint64(max(room, 0)))
+	}
+	if in.Flags.Has(TransferBalancingCredit) {
+		room, ok := test.cr.CreditHeadroom()
+		if !ok {
+			t.Fatal("row: credit headroom does not fit an int64")
+		}
+		wantAmount = min(wantAmount, uint64(max(room, 0)))
+	}
+
+	// Stored record.
+	wantRec := in
+	wantRec.Amount = wantAmount
+	if !in.Flags.Has(TransferImported) {
+		wantRec.Timestamp = ts
+	}
+	if isPost || isVoid { // takes from its pending transfer what it left zero
+		wantRec.DebitAccountID, wantRec.CreditAccountID = pend.DebitAccountID, pend.CreditAccountID
+		wantRec.Ledger, wantRec.Code = pend.Ledger, pend.Code
+		wantRec.UserData64 = cmp.Or(in.UserData64, pend.UserData64)
+		wantRec.UserData32 = cmp.Or(in.UserData32, pend.UserData32)
+	}
+	if rec != wantRec {
+		t.Errorf("stored record mismatch\nwant:%+v\ngot :%+v", wantRec, rec)
+	}
+
+	// Balances: debits on dr mirror credits on cr.
+	wantDrBalance, wantCrBalance := test.dr.Balance, test.cr.Balance
+	switch {
+	case isPending:
+		wantDrBalance.DebitsPending += wantAmount
+		wantCrBalance.CreditsPending += wantAmount
+	case isPost, isVoid:
+		wantDrBalance.DebitsPending -= pend.Amount // the whole reservation is released
+		wantCrBalance.CreditsPending -= pend.Amount
+		if isPost {
+			wantDrBalance.DebitsPosted += wantAmount
+			wantCrBalance.CreditsPosted += wantAmount
+		}
+	default:
+		wantDrBalance.DebitsPosted += wantAmount
+		wantCrBalance.CreditsPosted += wantAmount
+	}
+
+	// Flags: only AccountClosed moves, by a closing transfer and by its void.
+	var wantDrFlagsSet, wantCrFlagsSet, wantDrFlagsCleared, wantCrFlagsCleared AccountFlags
+	if in.Flags.Has(TransferClosingDebit) {
+		wantDrFlagsSet = AccountClosed
+	}
+	if in.Flags.Has(TransferClosingCredit) {
+		wantCrFlagsSet = AccountClosed
+	}
+	if isVoid && pend.Flags.Has(TransferClosingDebit) {
+		wantDrFlagsCleared = AccountClosed
+	}
+	if isVoid && pend.Flags.Has(TransferClosingCredit) {
+		wantCrFlagsCleared = AccountClosed
+	}
+
+	// Whole accounts, so that nothing else changed either.
+	wantDr, wantCr := test.dr, test.cr
+	wantDr.Balance, wantCr.Balance = wantDrBalance, wantCrBalance
+	wantDr.Flags = (test.dr.Flags | wantDrFlagsSet) &^ wantDrFlagsCleared
+	wantCr.Flags = (test.cr.Flags | wantCrFlagsSet) &^ wantCrFlagsCleared
+	if dr != wantDr {
+		t.Errorf("debitor mismatch\nwant:%+v\ngot :%+v", wantDr, dr)
+	}
+	if cr != wantCr {
+		t.Errorf("creditor mismatch\nwant:%+v\ngot :%+v", wantCr, cr)
+	}
+	if test.pending != nil && auxpend != *test.pending {
+		t.Error("on success immutable pending promise broken")
+	}
+
+	// Invariants: true of every accepted transfer, whatever the wants above say.
+	if dr.DebitsPending-test.dr.DebitsPending != cr.CreditsPending-test.cr.CreditsPending ||
+		dr.DebitsPosted-test.dr.DebitsPosted != cr.CreditsPosted-test.cr.CreditsPosted {
+		t.Error("invariant: debits moved on dr differ from credits moved on cr")
+	}
+	if dr.DebitsPosted < test.dr.DebitsPosted || cr.CreditsPosted < test.cr.CreditsPosted {
+		t.Error("invariant: a posted counter went down")
+	}
+	grew := dr.DebitsPending > test.dr.DebitsPending || cr.CreditsPending > test.cr.CreditsPending
+	shrank := dr.DebitsPending < test.dr.DebitsPending || cr.CreditsPending < test.cr.CreditsPending
+	if grew && !isPending || shrank && !(isPost || isVoid) {
+		t.Error("invariant: a pending counter moved the wrong way")
+	}
+	for _, a := range []Account{dr, cr} {
+		debits, credits := sum64(a.DebitsPending, a.DebitsPosted), sum64(a.CreditsPending, a.CreditsPosted)
+		if debits.hi != 0 || credits.hi != 0 {
+			t.Errorf("invariant: account %d pending plus posted passes 2^64", a.ID)
+		}
+		if a.Flags.Has(AccountDebitsMustNotExceedCredits) && (u128{lo: a.CreditsPosted}).less(debits) {
+			t.Errorf("invariant: account %d debits exceed credits", a.ID)
+		}
+		if a.Flags.Has(AccountCreditsMustNotExceedDebits) && (u128{lo: a.DebitsPosted}).less(credits) {
+			t.Errorf("invariant: account %d credits exceed debits", a.ID)
+		}
+	}
+	if !isVoid && (test.dr.Flags | test.cr.Flags).Has(AccountClosed) {
+		t.Error("invariant: a closed account took a movement other than a void")
+	}
+	if rec.Timestamp <= dr.Timestamp || rec.Timestamp <= cr.Timestamp {
+		t.Error("invariant: record does not postdate its accounts")
+	}
+
+	// Replay: the stored record rebuilds both accounts from their initial state.
+	for _, a := range []struct{ before, after Account }{{test.dr, dr}, {test.cr, cr}} {
+		got := a.before
+		if code := ExecuteReplay(&got, &rec, pend); code != 0 {
+			t.Errorf("replay on account %d: %s", got.ID, code)
+		} else if got != a.after {
+			t.Errorf("replay on account %d mismatch\nwant:%+v\ngot :%+v", got.ID, a.after, got)
+		}
 	}
 }
 
@@ -227,7 +369,7 @@ func TestExecuteClosing(t *testing.T) {
 		t.Errorf("transfer on closed account = %v", code)
 	}
 	post := b.Post(&closing, AmountMax)
-	if code := Execute(&post, execTS, &dr, &cr, &closing, PendingActive); code != ErrDebitAccountAlreadyClosed {
+	if code := Execute(&dr, &cr, &post, &closing, PendingActive, execTS); code != ErrDebitAccountAlreadyClosed {
 		t.Errorf("post of the closing transfer = %v; it can only be voided", code)
 	}
 	voidOther := b.Void(&other) // voids still flow through a closed account
@@ -255,7 +397,7 @@ func TestExecuteClosingCredit(t *testing.T) {
 		t.Fatalf("closing credit: dr %v cr %v", dr.Flags, cr.Flags)
 	}
 	plain := b.Transfer(idDebit, idCred, 1)
-	if code := Execute(&plain, execTS, &dr, &cr, nil, PendingNone); code != ErrCreditAccountAlreadyClosed {
+	if code := Execute(&dr, &cr, &plain, nil, PendingNone, execTS); code != ErrCreditAccountAlreadyClosed {
 		t.Errorf("transfer into closed account = %v", code)
 	}
 	reopen := b.Void(&closing)
@@ -351,7 +493,7 @@ func (c *execCase) run(t *testing.T) {
 	}
 	tr := c.t
 	drBefore, crBefore, trBefore := dr, cr, tr
-	if got := Execute(&tr, execTS, pdr, pcr, c.p, c.status); got != c.want {
+	if got := Execute(pdr, pcr, &tr, c.p, c.status, execTS); got != c.want {
 		t.Errorf("%s: Execute = %v, want %v", c.name, got, c.want)
 	}
 	if c.want != 0 && (dr != drBefore || cr != crBefore || tr != trBefore) {
@@ -477,13 +619,13 @@ func TestExecutePanicsOnCallerBugs(t *testing.T) {
 		name string
 		run  func(dr, cr *Account)
 	}{
-		{"pending transfer for a plain t", func(dr, cr *Account) { tr := plain; Execute(&tr, execTS, dr, cr, &p, PendingActive) }},
-		{"wrong pending transfer", func(dr, cr *Account) { tr := post; Execute(&tr, execTS, dr, cr, &other, PendingActive) }},
-		{"wrong debit account", func(dr, cr *Account) { tr := plain; Execute(&tr, execTS, cr, cr, nil, PendingNone) }},
-		{"resolve without accounts", func(dr, cr *Account) { tr := post; Execute(&tr, execTS, nil, cr, &p, PendingActive) }},
-		{"pending with status none", func(dr, cr *Account) { tr := post; Execute(&tr, execTS, dr, cr, &p, PendingNone) }},
-		{"reservation missing from counters", func(dr, cr *Account) { tr := post; Execute(&tr, execTS, dr, cr, &p, PendingActive) }},
-		{"non-positive timestamp", func(dr, cr *Account) { tr := plain; Execute(&tr, 0, dr, cr, nil, PendingNone) }},
+		{"pending transfer for a plain t", func(dr, cr *Account) { tr := plain; Execute(dr, cr, &tr, &p, PendingActive, execTS) }},
+		{"wrong pending transfer", func(dr, cr *Account) { tr := post; Execute(dr, cr, &tr, &other, PendingActive, execTS) }},
+		{"wrong debit account", func(dr, cr *Account) { tr := plain; Execute(cr, cr, &tr, nil, PendingNone, execTS) }},
+		{"resolve without accounts", func(dr, cr *Account) { tr := post; Execute(nil, cr, &tr, &p, PendingActive, execTS) }},
+		{"pending with status none", func(dr, cr *Account) { tr := post; Execute(dr, cr, &tr, &p, PendingNone, execTS) }},
+		{"reservation missing from counters", func(dr, cr *Account) { tr := post; Execute(dr, cr, &tr, &p, PendingActive, execTS) }},
+		{"non-positive timestamp", func(dr, cr *Account) { tr := plain; Execute(dr, cr, &tr, nil, PendingNone, 0) }},
 		{"replay onto an unrelated account", func(dr, cr *Account) { stranger := Account{ID: 99}; ExecuteReplay(&stranger, &plain, nil) }},
 		{"replay with wrong pending", func(dr, cr *Account) { ExecuteReplay(dr, &post, &other) }},
 		{"replay of a post without its pending", func(dr, cr *Account) { ExecuteReplay(dr, &post, nil) }},
@@ -561,7 +703,7 @@ func TestExecuteRandomMatchesReplay(t *testing.T) {
 			dr, cr = byID(accts, tr.DebitAccountID), byID(accts, tr.CreditAccountID)
 		}
 		before := append([]Account(nil), accts...)
-		code := Execute(&tr, ts, dr, cr, p, ps)
+		code := Execute(dr, cr, &tr, p, ps, ts)
 		codes[code]++
 		if code != 0 {
 			for i := range accts {
