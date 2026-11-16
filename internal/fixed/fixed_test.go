@@ -6,49 +6,49 @@ import (
 	"testing"
 )
 
-func TestParse(t *testing.T) {
+func TestSplit(t *testing.T) {
 	cases := []struct {
 		s    string
 		exp  int8
 		q    uint64
 		neg  bool
-		tail Tail
+		tail tail
 		err  Err
 	}{
-		{"1234.56", -2, 123456, false, TailZero, 0},
-		{"-0.01", -2, 1, true, TailZero, 0},
-		{"+7", 0, 7, false, TailZero, 0},
-		{".5", -1, 5, false, TailZero, 0},
-		{"5.", 0, 5, false, TailZero, 0},
-		{"-0", -2, 0, true, TailZero, 0},
-		{"1e3", 0, 1000, false, TailZero, 0},
-		{"1.5E-1", -2, 15, false, TailZero, 0},
-		{"2e+2", 2, 2, false, TailZero, 0},
-		{"1.000", -2, 100, false, TailZero, 0}, // zeros below exp are no tail
-		{"1200", 2, 12, false, TailZero, 0},
-		{"0e100", 0, 0, false, TailZero, 0},
-		{"000000000000000000000000000001", 0, 1, false, TailZero, 0},
+		{"1234.56", -2, 123456, false, tailZero, 0},
+		{"-0.01", -2, 1, true, tailZero, 0},
+		{"+7", 0, 7, false, tailZero, 0},
+		{".5", -1, 5, false, tailZero, 0},
+		{"5.", 0, 5, false, tailZero, 0},
+		{"-0", -2, 0, true, tailZero, 0},
+		{"1e3", 0, 1000, false, tailZero, 0},
+		{"1.5E-1", -2, 15, false, tailZero, 0},
+		{"2e+2", 2, 2, false, tailZero, 0},
+		{"1.000", -2, 100, false, tailZero, 0}, // zeros below exp are no tail
+		{"1200", 2, 12, false, tailZero, 0},
+		{"0e100", 0, 0, false, tailZero, 0},
+		{"000000000000000000000000000001", 0, 1, false, tailZero, 0},
 
 		// Tail: the first digit cut off, and whether any later one is nonzero.
-		{"0.005", -2, 0, false, TailHalf, 0},
-		{"0.015", -2, 1, false, TailHalf, 0},
-		{"0.02501", -2, 2, false, TailAbove, 0},
-		{"0.0049999", -2, 0, false, TailBelow, 0},
-		{"0.009", -2, 0, false, TailAbove, 0},
-		{"0.001", -2, 0, false, TailBelow, 0},
-		{"-0.005", -2, 0, true, TailHalf, 0},
-		{"5", 2, 0, false, TailBelow, 0}, // 0.05 of the unit: every digit cut off
-		{"50", 2, 0, false, TailHalf, 0},
-		{"51", 2, 0, false, TailAbove, 0},
-		{"1e-30", 0, 0, false, TailBelow, 0},
-		{"0.0050000000000000000000000001", -2, 0, false, TailAbove, 0},
-		{"0.123456789012345678901234567890", -2, 12, false, TailBelow, 0}, // a long tail does not overflow
+		{"0.005", -2, 0, false, tailHalf, 0},
+		{"0.015", -2, 1, false, tailHalf, 0},
+		{"0.02501", -2, 2, false, tailAbove, 0},
+		{"0.0049999", -2, 0, false, tailBelow, 0},
+		{"0.009", -2, 0, false, tailAbove, 0},
+		{"0.001", -2, 0, false, tailBelow, 0},
+		{"-0.005", -2, 0, true, tailHalf, 0},
+		{"5", 2, 0, false, tailBelow, 0}, // 0.05 of the unit: every digit cut off
+		{"50", 2, 0, false, tailHalf, 0},
+		{"51", 2, 0, false, tailAbove, 0},
+		{"1e-30", 0, 0, false, tailBelow, 0},
+		{"0.0050000000000000000000000001", -2, 0, false, tailAbove, 0},
+		{"0.123456789012345678901234567890", -2, 12, false, tailBelow, 0}, // a long tail does not overflow
 
 		// Range.
-		{"18446744073709551615", 0, math.MaxUint64, false, TailZero, 0},
-		{"184467440737095516.15", -2, math.MaxUint64, false, TailZero, 0},
+		{"18446744073709551615", 0, math.MaxUint64, false, tailZero, 0},
+		{"184467440737095516.15", -2, math.MaxUint64, false, tailZero, 0},
 		{"18446744073709551616", 0, 0, false, 0, ErrRange},
-		{"1e19", 0, 1e19, false, TailZero, 0},
+		{"1e19", 0, 1e19, false, tailZero, 0},
 		{"2e19", 0, 0, false, 0, ErrRange}, // the power-of-ten multiply overflows
 		{"1e20", 0, 0, false, 0, ErrRange}, // past the power-of-ten table
 		{"1e100000", 0, 0, false, 0, ErrRange},
@@ -73,12 +73,125 @@ func TestParse(t *testing.T) {
 		{"1e2.5", -2, 0, false, 0, ErrSyntax},
 	}
 	for _, c := range cases {
-		q, neg, tail, err := Parse([]byte(c.s), c.exp)
-		if q != c.q || neg != c.neg || tail != c.tail || err != c.err {
-			t.Errorf("Parse(%q, %d) = %d, %v, %d, %d; want %d, %v, %d, %d",
-				c.s, c.exp, q, neg, tail, err, c.q, c.neg, c.tail, c.err)
+		q, neg, tl, err := split([]byte(c.s), c.exp)
+		if q != c.q || neg != c.neg || tl != c.tail || err != c.err {
+			t.Errorf("split(%q, %d) = %d, %v, %d, %d; want %d, %v, %d, %d",
+				c.s, c.exp, q, neg, tl, err, c.q, c.neg, c.tail, c.err)
 		}
 	}
+}
+
+func TestParse(t *testing.T) {
+	cases := []struct {
+		s    string
+		exp  int8
+		mode Round
+		want uint64
+		err  Err
+	}{
+		{"1234.56", -2, RoundExact, 123456, 0},
+		{"0.005", -2, RoundHalfAway, 1, 0},
+		{"0.005", -2, RoundHalfEven, 0, 0},
+		{"0.015", -2, RoundHalfEven, 2, 0},
+		{"0.025", -2, RoundHalfEven, 2, 0},
+		{"0.02501", -2, RoundHalfEven, 3, 0},
+		{"0.0049999", -2, RoundHalfAway, 0, 0},
+		{"0.001", -2, RoundUp, 1, 0},
+		{"0.009", -2, RoundDown, 0, 0},
+		{"0.005", -2, RoundExact, 0, ErrInexact},
+		{"5", 2, RoundHalfAway, 0, 0}, // 0.05 of the unit
+		{"5", 2, RoundUp, 1, 0},
+		{"50", 2, RoundHalfAway, 1, 0},
+		{"50", 2, RoundHalfEven, 0, 0},
+		{"1e-30", 0, RoundHalfAway, 0, 0},
+		{"1e-30", 0, RoundExact, 0, ErrInexact},
+		{"18446744073709551615", 0, RoundExact, math.MaxUint64, 0},
+		{"18446744073709551615.4", 0, RoundHalfAway, math.MaxUint64, 0},
+		{"18446744073709551615.5", 0, RoundHalfAway, 0, ErrRange}, // rounding up wraps
+		{"18446744073709551616", 0, RoundExact, 0, ErrRange},
+		{"1e100000", 0, RoundExact, 0, ErrRange},
+		{"-0", -2, RoundExact, 0, 0},
+		{"-0.00", -2, RoundExact, 0, 0},
+		{"-0.001", -2, RoundDown, 0, ErrRange}, // negative, though it rounds to zero
+		{"-1", -2, RoundExact, 0, ErrRange},
+		{"1.2.3", -2, RoundExact, 0, ErrSyntax},
+	}
+	for _, c := range cases {
+		got, err := Parse([]byte(c.s), c.exp, c.mode)
+		if got != c.want || err != c.err {
+			t.Errorf("Parse(%q, %d, %v) = %d, %v; want %d, %v", c.s, c.exp, c.mode, got, err, c.want, c.err)
+		}
+	}
+	mustPanic(t, "Parse mode 0", func() { Parse([]byte("1"), 0, 0) })
+	for err, want := range map[Err]string{ErrSyntax: "invalid syntax", ErrRange: "value out of range", ErrInexact: "inexact result"} {
+		if got := err.Error(); got != want {
+			t.Errorf("Err(%d).Error() = %q; want %q", err, got, want)
+		}
+	}
+}
+
+func TestMulDiv(t *testing.T) {
+	// (2^65-1)/31 times 31 is 2^65-1 = 2·(2^64-1) + 1: half by 2 is 2^64-1 rem 1.
+	const a = (1<<65 - 1) / 31
+	cases := []struct {
+		a, num, den uint64
+		mode        Round
+		want        uint64
+		err         Err
+	}{
+		{10, 1, 3, RoundDown, 3, 0},
+		{10, 1, 3, RoundUp, 4, 0},
+		{10, 1, 3, RoundHalfAway, 3, 0},
+		{10, 1, 3, RoundHalfEven, 3, 0},
+		{10, 1, 3, RoundExact, 0, ErrInexact},
+		{9, 1, 3, RoundExact, 3, 0},
+		{5, 1, 2, RoundHalfAway, 3, 0},
+		{5, 1, 2, RoundHalfEven, 2, 0},
+		{7, 1, 2, RoundHalfEven, 4, 0},
+		{5, 1, 2, RoundDown, 2, 0},
+		{11, 1, 4, RoundHalfAway, 3, 0}, // 2.75
+		{9, 1, 4, RoundHalfAway, 2, 0},  // 2.25
+		{0, 7, 3, RoundExact, 0, 0},
+		{math.MaxUint64, math.MaxUint64, math.MaxUint64, RoundExact, math.MaxUint64, 0},
+		{math.MaxUint64, 2, 1, RoundDown, 0, ErrRange},
+		{math.MaxUint64, 3, 2, RoundDown, 0, ErrRange},
+		{a, 31, 2, RoundDown, math.MaxUint64, 0},
+		{a, 31, 2, RoundUp, 0, ErrRange},       // rounding up passes 2^64-1
+		{a, 31, 2, RoundHalfAway, 0, ErrRange}, // at half: up
+		{a, 31, 2, RoundHalfEven, 0, ErrRange}, // 2^64-1 is odd: up
+	}
+	for _, c := range cases {
+		got, err := MulDiv(c.a, c.num, c.den, c.mode)
+		if got != c.want || err != c.err {
+			t.Errorf("MulDiv(%d, %d, %d, %v) = %d, %v; want %d, %v", c.a, c.num, c.den, c.mode, got, err, c.want, c.err)
+		}
+	}
+	mustPanic(t, "den 0", func() { MulDiv(1, 1, 0, RoundDown) })
+	mustPanic(t, "mode 0", func() { MulDiv(1, 1, 1, 0) })
+	if n := testing.AllocsPerRun(100, func() { MulDiv(12345, 7, 3, RoundHalfEven) }); n != 0 {
+		t.Errorf("MulDiv allocates %v times", n)
+	}
+}
+
+func TestCheckRound(t *testing.T) {
+	for m := RoundExact; m < roundMax; m++ {
+		CheckRound(m)
+	}
+	mustPanic(t, "Round 0", func() { CheckRound(0) })
+	mustPanic(t, "Round past last", func() { CheckRound(roundMax) })
+	if got := RoundHalfEven.String(); got != "half even" {
+		t.Errorf("RoundHalfEven.String() = %q", got)
+	}
+}
+
+func mustPanic(t *testing.T, name string, f func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Errorf("%s: no panic", name)
+		}
+	}()
+	f()
 }
 
 func TestExp(t *testing.T) {
@@ -162,20 +275,20 @@ func TestRoundTrip(t *testing.T) {
 		exp := int8(rng.IntN(32) - 25) // -25 through 6
 		trim := rng.IntN(2) == 0
 		buf = Append(buf[:0], u, exp, trim)
-		q, neg, tail, err := Parse(buf, exp)
-		if q != u || neg || tail != TailZero || err != 0 {
-			t.Fatalf("Parse(Append(%d, %d, %v) = %q) = %d, %v, %d, %d", u, exp, trim, buf, q, neg, tail, err)
+		q, err := Parse(buf, exp, RoundExact)
+		if q != u || err != 0 {
+			t.Fatalf("Parse(Append(%d, %d, %v) = %q) = %d, %v", u, exp, trim, buf, q, err)
 		}
 	}
 }
 
 func TestAllocs(t *testing.T) {
-	b := []byte("-1234567.891e-1")
+	b := []byte("1234567.891e-1")
 	dst := make([]byte, 0, 64)
-	if n := testing.AllocsPerRun(100, func() { Parse(b, -2) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { Parse(b, -2, RoundHalfEven) }); n != 0 {
 		t.Errorf("Parse allocates %v times", n)
 	}
-	if n := testing.AllocsPerRun(100, func() { Parse(b[:3], -2) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { Parse(b, -2, RoundExact) }); n != 0 {
 		t.Errorf("Parse failing allocates %v times", n)
 	}
 	if n := testing.AllocsPerRun(100, func() { Append(dst[:0], math.MaxUint64, -7, false) }); n != 0 {

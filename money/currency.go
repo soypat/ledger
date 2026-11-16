@@ -13,7 +13,7 @@ import "github.com/soypat/ledger/internal/fixed"
 //
 // A value is the ledger number of the accounts that hold it: Account.Ledger and
 // Transfer.Ledger in package ledger. Money needs only a currency's exponent and ticker;
-// conversion between currencies is [Rates] and [Exchange].
+// conversion between currencies is [Exchange].
 type Currency interface {
 	~uint32
 	// Exp is the minor-unit exponent, fixed per value: -2 for cents, 0 for JPY,
@@ -26,12 +26,11 @@ type Currency interface {
 
 // ParseAmount parses decimal text in major units of c, such as "1234.56" or "1.5e3",
 // into minor units: 123456 for USD. Digits below c's minor unit round by mode, and
-// RoundExact reports them as ErrInexact. ErrSyntax on anything but an optional sign,
-// digits with at most one point, and an optional e or E exponent; ErrRange if negative
-// or past 2^64-1. It panics on an invalid mode.
+// RoundExact reports them as an error. An error too on anything but an optional sign,
+// digits with at most one point, and an optional e or E exponent, or if negative or
+// past 2^64-1. It panics on an invalid mode.
 func ParseAmount[C Currency](b []byte, c C, mode Round) (uint64, error) {
-	mode.check()
-	return parse(b, c.Exp(), mode)
+	return result(fixed.Parse(b, c.Exp(), mode))
 }
 
 // AppendAmount appends v minor units of c to dst in major units, with every minor
@@ -40,12 +39,12 @@ func AppendAmount[C Currency](dst []byte, v uint64, c C) []byte {
 	return fixed.Append(dst, v, c.Exp(), false)
 }
 
-// ParseTicker returns the currency in set whose Ticker is b; ErrUnknownCurrency if none.
+// ParseTicker returns the currency in set whose Ticker is b; an error if none.
 func ParseTicker[C Currency](b []byte, set []C) (C, error) {
 	for _, c := range set {
 		if string(b) == c.Ticker() {
 			return c, nil
 		}
 	}
-	return 0, ErrUnknownCurrency
+	return 0, errUnknownCurrency
 }

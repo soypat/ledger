@@ -1,31 +1,12 @@
-// Package fixed reads and writes ASCII decimals as unsigned integers at a fixed
-// exponent: q at exponent -2 counts hundredths. It does not round. [Parse] truncates
-// and reports what it cut off as a [Tail], so callers apply their own rounding rule.
+// Package fixed does decimal fixed-point arithmetic on unsigned integers: ASCII text
+// parsed and printed at a fixed exponent, so q at exponent -2 counts hundredths;
+// rounding by a [Round] the caller names; and exact 128-bit multiply-divide.
 package fixed
 
 import (
 	"math"
 	"math/bits"
 	"strconv"
-)
-
-// Err is why a parse failed; the zero value is success.
-type Err uint8
-
-const (
-	_         Err = iota
-	ErrSyntax     // anything but a sign, digits with at most one point, and an e exponent
-	ErrRange      // a magnitude past 2^64-1, or an e exponent past maxSci
-)
-
-// Tail is what [Parse] cut off below the unit of its exponent, against half a unit.
-type Tail uint8
-
-const (
-	TailZero  Tail = iota // nothing, or only zeros
-	TailBelow             // below half a unit
-	TailHalf              // exactly half a unit
-	TailAbove             // above half a unit
 )
 
 // maxSci bounds the e exponent; past it every value overflows or is cut off.
@@ -115,17 +96,16 @@ func parseSci(b []byte) (int, Err) {
 }
 
 // Exp returns the exponent of the last digit of ASCII decimal b: -2 for "1.50", 0 for
-// "15", 2 for "1.5e3". It reports the same syntax errors as [Parse].
+// "15", 2 for "1.5e3". It reports the same syntax errors as [Parse], ignoring sign.
 func Exp(b []byte) (int, Err) {
 	num, err := scan(b)
 	return num.sci - num.nfrac, err
 }
 
-// Parse reads ASCII decimal b, such as "-1234.56" or "1.5e3", as the magnitude q with
-// q·10^exp equal to |b| truncated, and tail saying what was cut off: exp -2 counts
-// hundredths. ErrSyntax on anything but an optional sign, digits with at most one
-// point, and an optional e or E exponent; ErrRange if q passes 2^64-1.
-func Parse(b []byte, exp int8) (q uint64, neg bool, tail Tail, err Err) {
+// split reads ASCII decimal b as the magnitude q with q·10^exp equal to |b|
+// truncated, and the tail cut off below it: exp -2 counts hundredths. ErrRange if q
+// passes 2^64-1.
+func split(b []byte, exp int8) (q uint64, neg bool, t tail, err Err) {
 	num, err := scan(b)
 	if err != 0 {
 		return 0, false, 0, err
@@ -165,13 +145,31 @@ func Parse(b []byte, exp int8) (q uint64, neg bool, tail Tail, err Err) {
 	}
 	switch {
 	case first > 5 || first == 5 && sticky:
-		tail = TailAbove
+		t = tailAbove
 	case first == 5:
-		tail = TailHalf
+		t = tailHalf
 	case first != 0 || sticky:
-		tail = TailBelow
+		t = tailBelow
 	}
-	return q, num.neg, tail, 0
+	return q, num.neg, t, 0
+}
+
+// Parse reads unsigned ASCII decimal b, such as "1234.56" or "1.5e3", as the q with
+// q·10^exp equal to b, rounding digits below exp by mode: exp -2 counts hundredths.
+// ErrSyntax on anything but an optional sign, digits with at most one point, and an
+// optional e or E exponent; ErrRange if negative, except zero, or past 2^64-1;
+// ErrInexact if mode is RoundExact and digits below exp are nonzero. It panics on an
+// invalid mode.
+func Parse(b []byte, exp int8, mode Round) (uint64, Err) {
+	CheckRound(mode)
+	q, neg, t, err := split(b, exp)
+	switch {
+	case err != 0:
+		return 0, err
+	case neg && (q != 0 || t != tailZero):
+		return 0, ErrRange
+	}
+	return roundUp(q, t, mode)
 }
 
 // Append appends u·10^exp in decimal to dst: 123456 at exp -2 is "1234.56". With trim,
