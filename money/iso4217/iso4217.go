@@ -7,6 +7,11 @@
 // which the ledger rejects.
 package iso4217
 
+import (
+	"cmp"
+	"slices"
+)
+
 // Currency is an ISO 4217 numeric code, such as 840 for the US dollar. The constants
 // name every active one by its alphabetic code; any other value is invalid, see
 // [Currency.Valid].
@@ -46,17 +51,9 @@ func (c Currency) Ticker() string {
 
 // find returns c's entry of the table by binary search; nil if c is not valid.
 func (c Currency) find() *entry {
-	lo, hi := 0, len(table)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if table[mid].c < c {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
+	i, ok := slices.BinarySearchFunc(table[:], c, func(e entry, c Currency) int { return cmp.Compare(e.c, c) })
+	if !ok {
+		return nil
 	}
-	if lo < len(table) && table[lo].c == c {
-		return &table[lo]
-	}
-	return nil
+	return &table[i]
 }
