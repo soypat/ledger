@@ -20,14 +20,6 @@ func accounts() (dr, cr Account) {
 		Account{ID: idCred, Ledger: 7, Code: 1, Timestamp: 200}
 }
 
-// mustExecute fails t unless Execute accepts tr.
-func mustExecute(t *testing.T, tr *Transfer, dr, cr *Account, p *Transfer, status PendingStatus) {
-	t.Helper()
-	if code := Execute(dr, cr, tr, p, status, execTS); code != 0 {
-		t.Fatalf("Execute(%+v) = %v", *tr, code)
-	}
-}
-
 type ExecuteTest struct {
 	name      string
 	dr, cr    Account
@@ -39,53 +31,226 @@ type ExecuteTest struct {
 	wantCode ErrCode // No panic test here.
 }
 
+// The txWith helpers and acctWithLedger return a fixture with one thing different.
+// A zero account ID in txWithAccounts leaves a post or void to inherit it.
+
+func txWithLedger(tr Transfer, ledger uint32) Transfer { tr.Ledger = ledger; return tr }
+
+func txWithCode(tr Transfer, code uint16) Transfer { tr.Code = code; return tr }
+
+func txWithFlags(tr Transfer, flags TransferFlags) Transfer { tr.Flags = flags; return tr }
+
+func txWithAccounts(tr Transfer, debit, credit ID) Transfer {
+	tr.DebitAccountID, tr.CreditAccountID = debit, credit
+	return tr
+}
+
+func txWithUserData(tr Transfer, ud64 uint64, ud32 uint32) Transfer {
+	tr.UserData64, tr.UserData32 = ud64, ud32
+	return tr
+}
+
+func acctWithLedger(a Account, ledger uint32) Account { a.Ledger = ledger; return a }
+
 func TestExecute_table(t *testing.T) {
 	const (
 		ledger = 7
 		idDeb  = 2
 		idCred = 3
 		idSub  = 4 // ID of the submitted transfer
+		idPend = 5 // ID of the pending transfer that posts and voids resolve
+		u64max = math.MaxUint64
+
+		closed  = AccountClosed
+		drLimit = AccountDebitsMustNotExceedCredits
+		crLimit = AccountCreditsMustNotExceedDebits
 	)
-	account := func(id ID, ts int64, b Balance) Account {
+	// B returns a balance from its four counters, in Balance's field order.
+	B := func(debitsPending, debitsPosted, creditsPending, creditsPosted uint64) Balance {
+		return Balance{
+			DebitsPending:  debitsPending,
+			DebitsPosted:   debitsPosted,
+			CreditsPending: creditsPending,
+			CreditsPosted:  creditsPosted,
+		}
+	}
+	account := func(id ID, ts int64, b Balance, flags AccountFlags) Account {
 		return Account{
 			ID:        id,
 			Ledger:    ledger,
 			Code:      1,
 			Balance:   b,
+			Flags:     flags,
 			Timestamp: ts,
 		}
 	}
-	B := func() Balance {
-		return Balance{}
-	}
-	// sub returns a plain transfer of 100 from the debit to the credit account.
-	sub := func() Transfer {
+	// debitor and creditor return the two accounts of a row, created at 100 and 200.
+	debitor := func(b Balance, flags AccountFlags) Account { return account(idDeb, 100, b, flags) }
+	creditor := func(b Balance, flags AccountFlags) Account { return account(idCred, 200, b, flags) }
+	// sub returns a transfer of amount from debitor to creditor, submitted with flags.
+	sub := func(amount uint64, flags TransferFlags) Transfer {
 		return Transfer{
 			ID:              idSub,
 			DebitAccountID:  idDeb,
 			CreditAccountID: idCred,
-			Amount:          100,
+			Amount:          amount,
 			Ledger:          ledger,
 			Code:            1,
+			Flags:           flags,
 		}
 	}
+	// post and void return a post or void of pend that names only pend, inheriting the rest.
+	post := func(amount uint64) Transfer {
+		return Transfer{ID: idSub, PendingID: idPend, Amount: amount, Flags: TransferPostPending}
+	}
+	void := func(amount uint64) Transfer {
+		return Transfer{ID: idSub, PendingID: idPend, Amount: amount, Flags: TransferVoidPending}
+	}
+	// imported returns tr submitted as imported, carrying its own timestamp ts.
+	imported := func(tr Transfer, ts int64) Transfer {
+		tr.Flags |= TransferImported
+		tr.Timestamp = ts
+		return tr
+	}
+
+	var (
+		// Open and empty accounts; cr8 is on another ledger.
+		dr0, cr0 = debitor(Balance{}, 0), creditor(Balance{}, 0)
+		cr8      = acctWithLedger(cr0, 8)
+		// pend reserves 50 from debitor to creditor, stored at 300, with UserData to inherit.
+		pend = Transfer{ID: idPend, DebitAccountID: idDeb, CreditAccountID: idCred, Amount: 50,
+			UserData64: 77, UserData32: 88, Ledger: ledger, Code: 1, Flags: TransferPending, Timestamp: 300}
+		pendClosingDr = txWithFlags(pend, TransferPending|TransferClosingDebit)
+		pendClosingCr = txWithFlags(pend, TransferPending|TransferClosingCredit)
+		notPending    = txWithFlags(pend, 0)
+		// Accounts holding pend's reservation, open and closed.
+		drHeld, crHeld             = debitor(B(50, 0, 0, 0), 0), creditor(B(0, 0, 50, 0), 0)
+		drHeldClosed, crHeldClosed = debitor(B(50, 0, 0, 0), closed), creditor(B(0, 0, 50, 0), closed)
+	)
 
 	var tests = []ExecuteTest{
-		{
-			name: "normal",
-			dr:   account(idDeb, 100, B()), cr: account(idCred, 100, B()),
-			submitted: sub(), pending: nil,
-		},
+		// Plain and pending.
+		{name: "plain", dr: dr0, cr: cr0, submitted: sub(100, 0)},
+		{name: "plain adds to existing counters", dr: debitor(B(1, 2, 3, 4), 0), cr: creditor(B(5, 6, 7, 8), 0), submitted: sub(100, 0)},
+		{name: "pending reserves", dr: dr0, cr: cr0, submitted: sub(100, TransferPending)},
+		{name: "pending adds to existing counters", dr: debitor(B(1, 2, 3, 4), 0), cr: creditor(B(5, 6, 7, 8), 0), submitted: sub(100, TransferPending)},
+		{name: "zero amount moves nothing", dr: dr0, cr: cr0, submitted: sub(0, 0)},
+		{name: "largest amount fits empty accounts", dr: dr0, cr: cr0, submitted: sub(u64max, 0)},
+		{name: "exactly fills debits posted", dr: debitor(B(0, u64max-100, 0, 0), 0), cr: cr0, submitted: sub(100, 0)},
+		{name: "imported just after creditor keeps its timestamp", dr: dr0, cr: cr0, submitted: imported(sub(100, 0), 201)},
+
+		// Balancing: moves at most the room the account has, whatever its flags.
+		{name: "balancing debit takes the room left", dr: debitor(B(0, 30, 0, 100), drLimit), cr: cr0, submitted: sub(AmountMax, TransferBalancingDebit)},
+		{name: "balancing debit below the room moves it all", dr: debitor(B(0, 30, 0, 100), drLimit), cr: cr0, submitted: sub(5, TransferBalancingDebit)},
+		{name: "balancing debit counts pending debits", dr: debitor(B(20, 30, 0, 100), drLimit), cr: cr0, submitted: sub(AmountMax, TransferBalancingDebit)},
+		{name: "balancing debit without room moves zero", dr: debitor(B(0, 100, 0, 100), drLimit), cr: cr0, submitted: sub(5, TransferBalancingDebit)},
+		{name: "balancing debit clamps without the account flag", dr: dr0, cr: cr0, submitted: sub(5, TransferBalancingDebit)},
+		{name: "balancing credit takes the room left", dr: dr0, cr: creditor(B(0, 1000, 0, 70), crLimit), submitted: sub(AmountMax, TransferBalancingCredit)},
+		{name: "pending balancing credit reserves the room left", dr: dr0, cr: creditor(B(0, 1000, 0, 70), crLimit), submitted: sub(AmountMax, TransferBalancingCredit|TransferPending)},
+		{name: "balancing both takes the smaller room", dr: debitor(B(0, 30, 0, 100), drLimit), cr: creditor(B(0, 40, 0, 0), 0), submitted: sub(AmountMax, TransferBalancingDebit|TransferBalancingCredit)},
+
+		// Account limits at their edge.
+		{name: "exactly reaches credits", dr: debitor(B(0, 0, 0, 100), drLimit), cr: cr0, submitted: sub(100, 0)},
+		{name: "exactly reaches debits", dr: dr0, cr: creditor(B(0, 100, 0, 0), crLimit), submitted: sub(100, 0)},
+
+		// Post and void of pend.
+		{name: "post of part releases the rest", dr: drHeld, cr: crHeld, pending: &pend, submitted: post(30)},
+		{name: "post of the exact amount", dr: drHeld, cr: crHeld, pending: &pend, submitted: post(50)},
+		{name: "post of AmountMax posts all", dr: drHeld, cr: crHeld, pending: &pend, submitted: post(AmountMax)},
+		{name: "post of zero releases all", dr: drHeld, cr: crHeld, pending: &pend, submitted: post(0)},
+		{name: "void of zero voids all", dr: drHeld, cr: crHeld, pending: &pend, submitted: void(0)},
+		{name: "void of the exact amount", dr: drHeld, cr: crHeld, pending: &pend, submitted: void(50)},
+		{name: "post among other reservations", dr: debitor(B(80, 10, 0, 0), 0), cr: creditor(B(0, 0, 80, 10), 0), pending: &pend, submitted: post(30)},
+		{name: "post keeps its own user data", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithUserData(post(AmountMax), 5, 6)},
+		{name: "post naming its pending's accounts", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithAccounts(post(AmountMax), idDeb, idCred)},
+		{name: "post naming its pending's ledger and code", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithCode(txWithLedger(post(AmountMax), ledger), 1)},
+		{name: "imported post keeps its timestamp", dr: drHeld, cr: crHeld, pending: &pend, submitted: imported(post(AmountMax), 400)},
+
+		// Closing: a pending closing transfer closes its side until its void.
+		{name: "closing debit closes the debitor", dr: dr0, cr: cr0, submitted: sub(100, TransferPending|TransferClosingDebit)},
+		{name: "closing credit closes the creditor", dr: dr0, cr: cr0, submitted: sub(100, TransferPending|TransferClosingCredit)},
+		{name: "closing both closes both", dr: dr0, cr: cr0, submitted: sub(100, TransferPending|TransferClosingDebit|TransferClosingCredit)},
+		{name: "void of closing debit reopens the debitor", dr: drHeldClosed, cr: crHeld, pending: &pendClosingDr, submitted: void(0)},
+		{name: "void of closing credit reopens the creditor", dr: drHeld, cr: crHeldClosed, pending: &pendClosingCr, submitted: void(0)},
+		{name: "void of closing debit leaves a closed creditor closed", dr: drHeldClosed, cr: crHeldClosed, pending: &pendClosingDr, submitted: void(0)},
+		{name: "void of closing credit leaves a closed debitor closed", dr: drHeldClosed, cr: crHeldClosed, pending: &pendClosingCr, submitted: void(0)},
+		{name: "void of another pending keeps the debitor closed", dr: drHeldClosed, cr: crHeld, pending: &pend, submitted: void(0)},
+		{name: "void of another pending keeps the creditor closed", dr: drHeld, cr: crHeldClosed, pending: &pend, submitted: void(0)},
+
+		// Rejected: validation, ledgers, imported timestamps, closed accounts.
+		{name: "invalid transfer", dr: dr0, cr: cr0, submitted: txWithLedger(sub(100, 0), 0), wantCode: ErrLedgerMustNotBeZero},
+		{name: "accounts on different ledgers", dr: dr0, cr: cr8, submitted: sub(100, 0), wantCode: ErrAccountsMustHaveTheSameLedger},
+		{name: "transfer on another ledger", dr: dr0, cr: cr0, submitted: txWithLedger(sub(100, 0), 8), wantCode: ErrTransferMustHaveTheSameLedgerAsAccounts},
+		{name: "imported not after debitor", dr: dr0, cr: cr0, submitted: imported(sub(100, 0), 100), wantCode: ErrImportedEventTimestampMustPostdateDebitAccount},
+		{name: "imported not after creditor", dr: dr0, cr: cr0, submitted: imported(sub(100, 0), 200), wantCode: ErrImportedEventTimestampMustPostdateCreditAccount},
+		{name: "debitor closed", dr: debitor(Balance{}, closed), cr: cr0, submitted: sub(100, 0), wantCode: ErrDebitAccountAlreadyClosed},
+		{name: "creditor closed", dr: dr0, cr: creditor(Balance{}, closed), submitted: sub(100, 0), wantCode: ErrCreditAccountAlreadyClosed},
+
+		// Rejected: overflows.
+		{name: "overflows debits pending", dr: debitor(B(u64max-10, 0, 0, 0), 0), cr: cr0, submitted: sub(100, TransferPending), wantCode: ErrOverflowsDebitsPending},
+		{name: "overflows credits pending", dr: dr0, cr: creditor(B(0, 0, u64max-10, 0), 0), submitted: sub(100, TransferPending), wantCode: ErrOverflowsCreditsPending},
+		{name: "overflows debits posted", dr: debitor(B(0, u64max-10, 0, 0), 0), cr: cr0, submitted: sub(100, 0), wantCode: ErrOverflowsDebitsPosted},
+		{name: "overflows credits posted", dr: dr0, cr: creditor(B(0, 0, 0, u64max-10), 0), submitted: sub(100, 0), wantCode: ErrOverflowsCreditsPosted},
+		{name: "pending checks posted overflow too", dr: debitor(B(0, u64max-10, 0, 0), 0), cr: cr0, submitted: sub(100, TransferPending), wantCode: ErrOverflowsDebitsPosted},
+		{name: "overflows debits", dr: debitor(B(u64max/2+1, u64max/2, 0, 0), 0), cr: cr0, submitted: sub(100, 0), wantCode: ErrOverflowsDebits},
+		{name: "overflows credits", dr: dr0, cr: creditor(B(0, 0, u64max/2+1, u64max/2), 0), submitted: sub(100, 0), wantCode: ErrOverflowsCredits},
+
+		// Rejected: account limits.
+		{name: "exceeds credits", dr: debitor(B(0, 0, 0, 99), drLimit), cr: cr0, submitted: sub(100, 0), wantCode: ErrExceedsCredits},
+		{name: "exceeds credits counts pending debits", dr: debitor(B(60, 0, 0, 150), drLimit), cr: cr0, submitted: sub(100, 0), wantCode: ErrExceedsCredits},
+		{name: "exceeds credits ignores pending credits", dr: debitor(B(0, 0, 1000, 0), drLimit), cr: cr0, submitted: sub(100, 0), wantCode: ErrExceedsCredits},
+		{name: "exceeds debits", dr: dr0, cr: creditor(B(0, 99, 0, 0), crLimit), submitted: sub(100, 0), wantCode: ErrExceedsDebits},
+		{name: "exceeds debits counts pending credits", dr: dr0, cr: creditor(B(0, 150, 60, 0), crLimit), submitted: sub(100, 0), wantCode: ErrExceedsDebits},
+		{name: "exceeds debits ignores pending debits", dr: dr0, cr: creditor(B(1000, 0, 0, 0), crLimit), submitted: sub(100, 0), wantCode: ErrExceedsDebits},
+
+		// Rejected: post and void of pend.
+		{name: "pending transfer not found", dr: drHeld, cr: crHeld, submitted: post(AmountMax), wantCode: ErrPendingTransferNotFound},
+		{name: "pending transfer not pending", dr: drHeld, cr: crHeld, pending: &notPending, submitted: post(AmountMax), wantCode: ErrPendingTransferNotPending},
+		{name: "different debit account", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithAccounts(post(AmountMax), 99, 0), wantCode: ErrPendingTransferHasDifferentDebitAccountID},
+		{name: "different credit account", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithAccounts(post(AmountMax), 0, 99), wantCode: ErrPendingTransferHasDifferentCreditAccountID},
+		{name: "equal accounts other than pending's", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithAccounts(post(AmountMax), idDeb, idDeb), wantCode: ErrPendingTransferHasDifferentCreditAccountID},
+		{name: "different ledger", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithLedger(post(AmountMax), 8), wantCode: ErrPendingTransferHasDifferentLedger},
+		{name: "different code", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithCode(post(AmountMax), 9), wantCode: ErrPendingTransferHasDifferentCode},
+		{name: "post above the reservation", dr: drHeld, cr: crHeld, pending: &pend, submitted: post(51), wantCode: ErrExceedsPendingTransferAmount},
+		{name: "void above the reservation", dr: drHeld, cr: crHeld, pending: &pend, submitted: void(51), wantCode: ErrExceedsPendingTransferAmount},
+		{name: "void below the reservation", dr: drHeld, cr: crHeld, pending: &pend, submitted: void(49), wantCode: ErrPendingTransferHasDifferentAmount},
+		{name: "post of a posted", dr: drHeld, cr: crHeld, pending: &pend, status: PendingPosted, submitted: post(AmountMax), wantCode: ErrPendingTransferAlreadyPosted},
+		{name: "void of a posted", dr: drHeld, cr: crHeld, pending: &pend, status: PendingPosted, submitted: void(0), wantCode: ErrPendingTransferAlreadyPosted},
+		{name: "post of a voided", dr: drHeld, cr: crHeld, pending: &pend, status: PendingVoided, submitted: post(AmountMax), wantCode: ErrPendingTransferAlreadyVoided},
+		{name: "void of a voided", dr: drHeld, cr: crHeld, pending: &pend, status: PendingVoided, submitted: void(0), wantCode: ErrPendingTransferAlreadyVoided},
+		{name: "imported post not after debitor", dr: drHeld, cr: crHeld, pending: &pend, submitted: imported(post(AmountMax), 100), wantCode: ErrImportedEventTimestampMustPostdateDebitAccount},
+		{name: "imported post not after creditor", dr: drHeld, cr: crHeld, pending: &pend, submitted: imported(post(AmountMax), 200), wantCode: ErrImportedEventTimestampMustPostdateCreditAccount},
+		{name: "post on closed debitor", dr: drHeldClosed, cr: crHeld, pending: &pend, submitted: post(AmountMax), wantCode: ErrDebitAccountAlreadyClosed},
+		{name: "post on closed creditor", dr: drHeld, cr: crHeldClosed, pending: &pend, submitted: post(AmountMax), wantCode: ErrCreditAccountAlreadyClosed},
+		{name: "post of a closing transfer", dr: drHeldClosed, cr: crHeld, pending: &pendClosingDr, submitted: post(AmountMax), wantCode: ErrDebitAccountAlreadyClosed},
+
+		// Precedence: two rules broken, TigerBeetle's order picks the code.
+		{name: "validation before ledgers", dr: dr0, cr: cr8, submitted: txWithLedger(sub(100, 0), 0), wantCode: ErrLedgerMustNotBeZero},
+		{name: "accounts' ledgers before the transfer's", dr: dr0, cr: cr8, submitted: txWithLedger(sub(100, 0), 9), wantCode: ErrAccountsMustHaveTheSameLedger},
+		{name: "ledgers before closed", dr: debitor(Balance{}, closed), cr: cr8, submitted: sub(100, 0), wantCode: ErrAccountsMustHaveTheSameLedger},
+		{name: "imported timestamp before closed", dr: debitor(Balance{}, closed), cr: cr0, submitted: imported(sub(100, 0), 100), wantCode: ErrImportedEventTimestampMustPostdateDebitAccount},
+		{name: "debitor closed before creditor closed", dr: debitor(Balance{}, closed), cr: creditor(Balance{}, closed), submitted: sub(100, 0), wantCode: ErrDebitAccountAlreadyClosed},
+		{name: "closed before overflow", dr: debitor(B(0, u64max, 0, 0), closed), cr: cr0, submitted: sub(100, 0), wantCode: ErrDebitAccountAlreadyClosed},
+		{name: "pending overflow before posted", dr: debitor(B(u64max-10, u64max-10, 0, 0), 0), cr: cr0, submitted: sub(100, TransferPending), wantCode: ErrOverflowsDebitsPending},
+		{name: "debits pending before credits pending", dr: debitor(B(u64max-10, 0, 0, 0), 0), cr: creditor(B(0, 0, u64max-10, 0), 0), submitted: sub(100, TransferPending), wantCode: ErrOverflowsDebitsPending},
+		{name: "overflow before exceeds", dr: debitor(B(0, u64max-10, 0, 0), drLimit), cr: cr0, submitted: sub(100, 0), wantCode: ErrOverflowsDebitsPosted},
+		{name: "exceeds credits before exceeds debits", dr: debitor(Balance{}, drLimit), cr: creditor(Balance{}, crLimit), submitted: sub(100, 0), wantCode: ErrExceedsCredits},
+		{name: "not pending before different account", dr: drHeld, cr: crHeld, pending: &notPending, submitted: txWithAccounts(post(AmountMax), 99, 0), wantCode: ErrPendingTransferNotPending},
+		{name: "different account before amount", dr: drHeld, cr: crHeld, pending: &pend, submitted: txWithAccounts(post(51), 99, 0), wantCode: ErrPendingTransferHasDifferentDebitAccountID},
+		{name: "amount before status", dr: drHeld, cr: crHeld, pending: &pend, status: PendingPosted, submitted: post(51), wantCode: ErrExceedsPendingTransferAmount},
+		{name: "status before imported timestamp", dr: drHeld, cr: crHeld, pending: &pend, status: PendingPosted, submitted: imported(post(AmountMax), 100), wantCode: ErrPendingTransferAlreadyPosted},
+		{name: "status before closed", dr: drHeldClosed, cr: crHeld, pending: &pend, status: PendingPosted, submitted: post(AmountMax), wantCode: ErrPendingTransferAlreadyPosted},
+		{name: "imported timestamp before closed on post", dr: drHeldClosed, cr: crHeld, pending: &pend, submitted: imported(post(AmountMax), 100), wantCode: ErrImportedEventTimestampMustPostdateDebitAccount},
 	}
 	for i := range tests {
 		test := &tests[i]
 		t.Run(test.name, func(t *testing.T) {
-			testAccountNoPanic(t, test)
+			testExecuteNoPanic(t, test)
 		})
 	}
 }
 
-func testAccountNoPanic(t *testing.T, test *ExecuteTest) {
+func testExecuteNoPanic(t *testing.T, test *ExecuteTest) {
 	dr := test.dr
 	cr := test.cr
 	sub := test.submitted
@@ -257,176 +422,6 @@ func testAccountNoPanic(t *testing.T, test *ExecuteTest) {
 	}
 }
 
-func TestExecutePlainAndPending(t *testing.T) {
-	dr, cr := accounts()
-	b := newBuilder(0)
-
-	plain := b.Transfer(idDebit, idCred, 100)
-	mustExecute(t, &plain, &dr, &cr, nil, PendingNone)
-	if dr.Balance != (Balance{DebitsPosted: 100}) || cr.Balance != (Balance{CreditsPosted: 100}) {
-		t.Errorf("after plain: dr %+v cr %+v", dr.Balance, cr.Balance)
-	}
-	if plain.Timestamp != execTS || plain.Amount != 100 {
-		t.Errorf("stored plain = %+v", plain)
-	}
-
-	p := b.Pending(idDebit, idCred, 50)
-	mustExecute(t, &p, &dr, &cr, nil, PendingNone)
-	if dr.Balance != (Balance{DebitsPending: 50, DebitsPosted: 100}) || cr.Balance != (Balance{CreditsPending: 50, CreditsPosted: 100}) {
-		t.Errorf("after pending: dr %+v cr %+v", dr.Balance, cr.Balance)
-	}
-
-	zero := b.Transfer(idDebit, idCred, 0) // allowed since TigerBeetle 0.16
-	mustExecute(t, &zero, &dr, &cr, nil, PendingNone)
-	if dr.DebitsPosted != 100 {
-		t.Errorf("zero transfer moved money: %+v", dr.Balance)
-	}
-}
-
-func TestExecutePostAndVoid(t *testing.T) {
-	b := newBuilder(0)
-	cases := []struct {
-		name       string
-		resolve    func(p *Transfer) Transfer
-		wantAmount uint64
-		wantPosted uint64
-	}{
-		{"partial post", func(p *Transfer) Transfer { return b.Post(p, 30) }, 30, 30},
-		{"full post", func(p *Transfer) Transfer { return b.Post(p, AmountMax) }, 50, 50},
-		{"zero post", func(p *Transfer) Transfer { return b.Post(p, 0) }, 0, 0},
-		{"void", func(p *Transfer) Transfer { return b.Void(p) }, 50, 0},
-		{"void of zero", func(p *Transfer) Transfer {
-			return Transfer{ID: b.ID(), PendingID: p.ID, Flags: TransferVoidPending}
-		}, 50, 0},
-	}
-	for _, c := range cases {
-		dr, cr := accounts()
-		p := b.Pending(idDebit, idCred, 50)
-		p.UserData64, p.UserData32 = 77, 88
-		mustExecute(t, &p, &dr, &cr, nil, PendingNone)
-
-		tr := c.resolve(&p)
-		tr.DebitAccountID, tr.CreditAccountID, tr.Ledger, tr.Code = 0, 0, 0, 0 // inherit all
-		tr.UserData32 = 99                                                     // own value kept
-		mustExecute(t, &tr, &dr, &cr, &p, PendingActive)
-		want := Transfer{ID: tr.ID, DebitAccountID: idDebit, CreditAccountID: idCred, PendingID: p.ID,
-			Amount: c.wantAmount, UserData64: 77, UserData32: 99, Ledger: 7, Code: 3, Flags: tr.Flags, Timestamp: execTS}
-		if tr != want {
-			t.Errorf("%s: stored %+v, want %+v", c.name, tr, want)
-		}
-		if dr.Balance != (Balance{DebitsPosted: c.wantPosted}) || cr.Balance != (Balance{CreditsPosted: c.wantPosted}) {
-			t.Errorf("%s: dr %+v cr %+v; reservation not fully released", c.name, dr.Balance, cr.Balance)
-		}
-	}
-}
-
-func TestExecuteBalancing(t *testing.T) {
-	b := newBuilder(0)
-	dr, cr := accounts()
-	dr.Flags = AccountDebitsMustNotExceedCredits
-	dr.CreditsPosted, dr.DebitsPosted = 100, 30 // 70 of room
-	cr.DebitsPosted = 1000
-
-	tr := b.Transfer(idDebit, idCred, AmountMax)
-	tr.Flags = TransferBalancingDebit
-	mustExecute(t, &tr, &dr, &cr, nil, PendingNone)
-	if tr.Amount != 70 || dr.DebitsPosted != 100 {
-		t.Errorf("balancing debit moved %d, dr %+v; want 70", tr.Amount, dr.Balance)
-	}
-
-	again := b.Transfer(idDebit, idCred, 5)
-	again.Flags = TransferBalancingDebit
-	mustExecute(t, &again, &dr, &cr, nil, PendingNone) // no room left: moves zero, no error
-	if again.Amount != 0 || dr.DebitsPosted != 100 {
-		t.Errorf("balancing with no room moved %d", again.Amount)
-	}
-
-	credit := b.Transfer(idDebit, idCred, AmountMax)
-	credit.Flags = TransferBalancingCredit | TransferPending
-	cr.Flags = AccountCreditsMustNotExceedDebits // credits 70 so far, debits posted 1000
-	dr.CreditsPosted = math.MaxUint64 / 2        // unconstrained on this side for the test
-	mustExecute(t, &credit, &dr, &cr, nil, PendingNone)
-	if credit.Amount != 1000-70 || cr.CreditsPending != 930 {
-		t.Errorf("balancing credit moved %d, cr %+v; want 930", credit.Amount, cr.Balance)
-	}
-}
-
-func TestExecuteClosing(t *testing.T) {
-	b := newBuilder(0)
-	dr, cr := accounts()
-	other := b.Pending(idDebit, idCred, 5)
-	mustExecute(t, &other, &dr, &cr, nil, PendingNone)
-
-	closing := b.Pending(idDebit, idCred, 0)
-	closing.Flags |= TransferClosingDebit
-	mustExecute(t, &closing, &dr, &cr, nil, PendingNone)
-	if !dr.Flags.Has(AccountClosed) || cr.Flags.Has(AccountClosed) {
-		t.Fatalf("closing debit: dr %v cr %v", dr.Flags, cr.Flags)
-	}
-
-	plain := b.Transfer(idDebit, idCred, 1)
-	if code := Execute(&dr, &cr, &plain, nil, PendingNone, execTS); code != ErrDebitAccountAlreadyClosed {
-		t.Errorf("transfer on closed account = %v", code)
-	}
-	post := b.Post(&closing, AmountMax)
-	if code := Execute(&dr, &cr, &post, &closing, PendingActive, execTS); code != ErrDebitAccountAlreadyClosed {
-		t.Errorf("post of the closing transfer = %v; it can only be voided", code)
-	}
-	voidOther := b.Void(&other) // voids still flow through a closed account
-	mustExecute(t, &voidOther, &dr, &cr, &other, PendingActive)
-	if !dr.Flags.Has(AccountClosed) {
-		t.Error("voiding an unrelated pending transfer reopened the account")
-	}
-
-	reopen := b.Void(&closing)
-	mustExecute(t, &reopen, &dr, &cr, &closing, PendingActive)
-	if dr.Flags.Has(AccountClosed) {
-		t.Error("voiding the closing transfer did not reopen the account")
-	}
-	plain = b.Transfer(idDebit, idCred, 1)
-	mustExecute(t, &plain, &dr, &cr, nil, PendingNone)
-}
-
-func TestExecuteClosingCredit(t *testing.T) {
-	b := newBuilder(0)
-	dr, cr := accounts()
-	closing := b.Pending(idDebit, idCred, 0)
-	closing.Flags |= TransferClosingCredit
-	mustExecute(t, &closing, &dr, &cr, nil, PendingNone)
-	if dr.Flags.Has(AccountClosed) || !cr.Flags.Has(AccountClosed) {
-		t.Fatalf("closing credit: dr %v cr %v", dr.Flags, cr.Flags)
-	}
-	plain := b.Transfer(idDebit, idCred, 1)
-	if code := Execute(&dr, &cr, &plain, nil, PendingNone, execTS); code != ErrCreditAccountAlreadyClosed {
-		t.Errorf("transfer into closed account = %v", code)
-	}
-	reopen := b.Void(&closing)
-	mustExecute(t, &reopen, &dr, &cr, &closing, PendingActive)
-	if cr.Flags.Has(AccountClosed) {
-		t.Error("voiding the closing transfer did not reopen the credit account")
-	}
-}
-
-// TestExecuteVoidReopensOnlyItsSide voids a closing-debit transfer whose credit account
-// another transfer closed: only the debit account reopens.
-func TestExecuteVoidReopensOnlyItsSide(t *testing.T) {
-	b := newBuilder(0)
-	dr, cr := accounts()
-	third := Account{ID: 30, Ledger: 7, Code: 1, Timestamp: 300}
-	closeDr := b.Pending(idDebit, idCred, 0)
-	closeDr.Flags |= TransferClosingDebit
-	mustExecute(t, &closeDr, &dr, &cr, nil, PendingNone)
-	closeCr := b.Pending(third.ID, idCred, 0)
-	closeCr.Flags |= TransferClosingCredit
-	mustExecute(t, &closeCr, &third, &cr, nil, PendingNone)
-
-	void := b.Void(&closeDr)
-	mustExecute(t, &void, &dr, &cr, &closeDr, PendingActive)
-	if dr.Flags.Has(AccountClosed) || !cr.Flags.Has(AccountClosed) {
-		t.Errorf("void of closing debit: dr %v cr %v; want only dr reopened", dr.Flags, cr.Flags)
-	}
-}
-
 // TestExecuteReplayErrors replays records onto an account whose history cannot have
 // led to them: each is rejected and leaves the account unchanged.
 func TestExecuteReplayErrors(t *testing.T) {
@@ -460,152 +455,6 @@ func TestExecuteReplayErrors(t *testing.T) {
 		if acc != c.acc {
 			t.Errorf("%s: failure changed account to %+v", c.name, acc)
 		}
-	}
-}
-
-// execCase is one Execute call over state built from the open accounts() pair.
-type execCase struct {
-	name   string
-	t      Transfer
-	dr, cr func(a *Account) // nil keeps the account as is
-	noDr   bool             // pass dr as not found
-	noCr   bool
-	p      *Transfer
-	status PendingStatus
-	want   ErrCode
-}
-
-func (c *execCase) run(t *testing.T) {
-	t.Helper()
-	dr, cr := accounts()
-	if c.dr != nil {
-		c.dr(&dr)
-	}
-	if c.cr != nil {
-		c.cr(&cr)
-	}
-	pdr, pcr := &dr, &cr
-	if c.noDr {
-		pdr = nil
-	}
-	if c.noCr {
-		pcr = nil
-	}
-	tr := c.t
-	drBefore, crBefore, trBefore := dr, cr, tr
-	if got := Execute(pdr, pcr, &tr, c.p, c.status, execTS); got != c.want {
-		t.Errorf("%s: Execute = %v, want %v", c.name, got, c.want)
-	}
-	if c.want != 0 && (dr != drBefore || cr != crBefore || tr != trBefore) {
-		t.Errorf("%s: failure changed state: t %+v dr %+v cr %+v", c.name, tr, dr, cr)
-	}
-}
-
-func TestExecuteErrors(t *testing.T) {
-	const max = math.MaxUint64
-	plain := Transfer{ID: 1, DebitAccountID: idDebit, CreditAccountID: idCred, Amount: 5, Ledger: 7, Code: 3}
-	pend := plain
-	pend.ID, pend.Amount, pend.Flags = 2, 50, TransferPending
-	post := Transfer{ID: 3, PendingID: 2, Amount: AmountMax, Flags: TransferPostPending}
-	void := Transfer{ID: 3, PendingID: 2, Flags: TransferVoidPending}
-	notPending := plain
-	notPending.ID = 2
-	reserved := func(a *Account) { // the pending transfer's reservation, already applied
-		if a.ID == idDebit {
-			a.DebitsPending = 50
-		} else {
-			a.CreditsPending = 50
-		}
-	}
-	with := func(base Transfer, mod func(t *Transfer)) Transfer { mod(&base); return base }
-	closed := func(a *Account) { a.Flags |= AccountClosed }
-	resolve := func(name string, tr Transfer, status PendingStatus, want ErrCode) execCase {
-		return execCase{name: name, t: tr, dr: reserved, cr: reserved, p: &pend, status: status, want: want}
-	}
-
-	cases := []execCase{
-		{name: "invalid transfer", t: with(plain, func(t *Transfer) { t.Ledger = 0 }), want: ErrLedgerMustNotBeZero},
-		{name: "debit not found", t: plain, noDr: true, want: ErrDebitAccountNotFound},
-		{name: "credit not found", t: plain, noCr: true, want: ErrCreditAccountNotFound},
-		{name: "accounts on different ledgers", t: plain, cr: func(a *Account) { a.Ledger = 8 }, want: ErrAccountsMustHaveTheSameLedger},
-		{name: "transfer on another ledger", t: with(plain, func(t *Transfer) { t.Ledger = 8 }), want: ErrTransferMustHaveTheSameLedgerAsAccounts},
-		{name: "imported before debit account", t: with(plain, func(t *Transfer) { t.Flags, t.Timestamp = TransferImported, 100 }),
-			want: ErrImportedEventTimestampMustPostdateDebitAccount},
-		{name: "imported before credit account", t: with(plain, func(t *Transfer) { t.Flags, t.Timestamp = TransferImported, 150 }),
-			want: ErrImportedEventTimestampMustPostdateCreditAccount},
-		{name: "debit closed", t: plain, dr: closed, want: ErrDebitAccountAlreadyClosed},
-		{name: "credit closed", t: plain, cr: closed, want: ErrCreditAccountAlreadyClosed},
-		{name: "overflows debits pending", t: pend, dr: func(a *Account) { a.DebitsPending = max - 10 }, want: ErrOverflowsDebitsPending},
-		{name: "overflows credits pending", t: pend, cr: func(a *Account) { a.CreditsPending = max - 10 }, want: ErrOverflowsCreditsPending},
-		{name: "overflows debits posted", t: plain, dr: func(a *Account) { a.DebitsPosted = max - 1 }, want: ErrOverflowsDebitsPosted},
-		{name: "overflows credits posted", t: plain, cr: func(a *Account) { a.CreditsPosted = max - 1 }, want: ErrOverflowsCreditsPosted},
-		{name: "pending checks posted overflow too", t: pend, dr: func(a *Account) { a.DebitsPosted = max - 1 }, want: ErrOverflowsDebitsPosted},
-		{name: "overflows debits", t: plain, dr: func(a *Account) { a.DebitsPending, a.DebitsPosted = max/2+1, max/2 }, want: ErrOverflowsDebits},
-		{name: "overflows credits", t: plain, cr: func(a *Account) { a.CreditsPending, a.CreditsPosted = max/2+1, max/2 }, want: ErrOverflowsCredits},
-		{name: "exceeds credits", t: plain, dr: func(a *Account) { a.Flags, a.CreditsPosted = AccountDebitsMustNotExceedCredits, 4 }, want: ErrExceedsCredits},
-		{name: "exceeds credits counts pending", t: plain, dr: func(a *Account) {
-			a.Flags, a.CreditsPosted, a.DebitsPending = AccountDebitsMustNotExceedCredits, 10, 6
-		}, want: ErrExceedsCredits},
-		{name: "exceeds debits", t: plain, cr: func(a *Account) { a.Flags, a.DebitsPosted = AccountCreditsMustNotExceedDebits, 4 }, want: ErrExceedsDebits},
-
-		{name: "pending transfer not found", t: post, want: ErrPendingTransferNotFound},
-		{name: "pending transfer not pending", t: post, p: &notPending, want: ErrPendingTransferNotPending},
-		resolve("different debit account", with(post, func(t *Transfer) { t.DebitAccountID = 99 }), PendingActive, ErrPendingTransferHasDifferentDebitAccountID),
-		resolve("different credit account", with(post, func(t *Transfer) { t.CreditAccountID = 99 }), PendingActive, ErrPendingTransferHasDifferentCreditAccountID),
-		resolve("equal accounts differ from pending", with(post, func(t *Transfer) { t.DebitAccountID, t.CreditAccountID = idDebit, idDebit }),
-			PendingActive, ErrPendingTransferHasDifferentCreditAccountID),
-		resolve("different ledger", with(post, func(t *Transfer) { t.Ledger = 8 }), PendingActive, ErrPendingTransferHasDifferentLedger),
-		resolve("different code", with(post, func(t *Transfer) { t.Code = 9 }), PendingActive, ErrPendingTransferHasDifferentCode),
-		resolve("post above the reservation", with(post, func(t *Transfer) { t.Amount = 51 }), PendingActive, ErrExceedsPendingTransferAmount),
-		resolve("void above the reservation", with(void, func(t *Transfer) { t.Amount = 51 }), PendingActive, ErrExceedsPendingTransferAmount),
-		resolve("void below the reservation", with(void, func(t *Transfer) { t.Amount = 49 }), PendingActive, ErrPendingTransferHasDifferentAmount),
-		resolve("already posted", post, PendingPosted, ErrPendingTransferAlreadyPosted),
-		resolve("already voided", void, PendingVoided, ErrPendingTransferAlreadyVoided),
-		resolve("imported post before debit account", with(post, func(t *Transfer) { t.Flags, t.Timestamp = t.Flags|TransferImported, 100 }),
-			PendingActive, ErrImportedEventTimestampMustPostdateDebitAccount),
-		resolve("imported post before credit account", with(post, func(t *Transfer) { t.Flags, t.Timestamp = t.Flags|TransferImported, 150 }),
-			PendingActive, ErrImportedEventTimestampMustPostdateCreditAccount),
-		{name: "post on closed debit", t: post, p: &pend, status: PendingActive,
-			dr: func(a *Account) { reserved(a); closed(a) }, cr: reserved, want: ErrDebitAccountAlreadyClosed},
-		{name: "post on closed credit", t: post, p: &pend, status: PendingActive,
-			dr: reserved, cr: func(a *Account) { reserved(a); closed(a) }, want: ErrCreditAccountAlreadyClosed},
-		{name: "void on closed account", t: void, p: &pend, status: PendingActive,
-			dr: func(a *Account) { reserved(a); closed(a) }, cr: reserved, want: 0},
-	}
-	for i := range cases {
-		cases[i].run(t)
-	}
-}
-
-// TestExecutePrecedence breaks two rules at once; TigerBeetle's order picks the code.
-func TestExecutePrecedence(t *testing.T) {
-	const max = math.MaxUint64
-	plain := Transfer{ID: 1, DebitAccountID: idDebit, CreditAccountID: idCred, Amount: 5, Ledger: 7, Code: 3}
-	pend := plain
-	pend.ID, pend.Amount, pend.Flags = 2, 50, TransferPending
-	post := Transfer{ID: 3, PendingID: 2, Amount: 51, Flags: TransferPostPending} // above the reservation
-	reserved := func(a *Account) { a.DebitsPending, a.CreditsPending = 50, 50 }
-	cases := []execCase{
-		{name: "validation before lookup", t: Transfer{ID: 1, DebitAccountID: idDebit, CreditAccountID: idCred, Code: 3},
-			noDr: true, want: ErrLedgerMustNotBeZero},
-		{name: "not found before ledgers", t: plain, noDr: true, cr: func(a *Account) { a.Ledger = 8 }, want: ErrDebitAccountNotFound},
-		{name: "ledgers before closed", t: plain, cr: func(a *Account) { a.Ledger = 8 }, dr: func(a *Account) { a.Flags = AccountClosed },
-			want: ErrAccountsMustHaveTheSameLedger},
-		{name: "closed before overflow", t: plain, dr: func(a *Account) { a.Flags, a.DebitsPosted = AccountClosed, max },
-			want: ErrDebitAccountAlreadyClosed},
-		{name: "overflow before exceeds", t: plain, dr: func(a *Account) { a.Flags, a.DebitsPosted = AccountDebitsMustNotExceedCredits, max-1 },
-			want: ErrOverflowsDebitsPosted},
-		{name: "pending overflow before posted", t: pend, dr: func(a *Account) { a.DebitsPending, a.DebitsPosted = max-1, max-1 },
-			want: ErrOverflowsDebitsPending},
-		{name: "different account before amount", t: Transfer{ID: 3, PendingID: 2, DebitAccountID: 99, Amount: 51, Flags: TransferPostPending},
-			p: &pend, status: PendingActive, dr: reserved, cr: reserved, want: ErrPendingTransferHasDifferentDebitAccountID},
-		{name: "amount before status", t: post, p: &pend, status: PendingPosted, dr: reserved, cr: reserved, want: ErrExceedsPendingTransferAmount},
-		{name: "status before closed", t: Transfer{ID: 3, PendingID: 2, Amount: AmountMax, Flags: TransferPostPending},
-			p: &pend, status: PendingPosted, dr: func(a *Account) { reserved(a); a.Flags = AccountClosed }, cr: reserved,
-			want: ErrPendingTransferAlreadyPosted},
-	}
-	for i := range cases {
-		cases[i].run(t)
 	}
 }
 
