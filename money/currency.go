@@ -13,7 +13,8 @@ import "github.com/soypat/ledger/internal/fixed"
 //
 // A value is the ledger number of the accounts that hold it: Account.Ledger and
 // Transfer.Ledger in package ledger. Money needs only a currency's exponent and ticker;
-// conversion between currencies is [Exchange].
+// conversion between currencies is [Exchange]. Package money/iso4217 has every
+// ISO 4217 currency ready-made.
 type Currency interface {
 	~uint32
 	// Exp is the minor-unit exponent, fixed per value: -2 for cents, 0 for JPY,
