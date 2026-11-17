@@ -23,6 +23,50 @@ func (r Rate) Of(amount uint64, mode Round) (uint64, bool) {
 	return MulDiv(amount, uint64(r), uint64(ppm_whole), mode)
 }
 
+// Gross returns net·(1+r) rounded by mode: an amount with tax or markup r added. False
+// if it passes 2^64-1, or mode is RoundExact and the result is inexact. It panics on an
+// invalid mode.
+func (r Rate) Gross(net uint64, mode Round) (uint64, bool) {
+	return MulDiv(net, r.plusWhole(), uint64(ppm_whole), mode)
+}
+
+// Net returns gross/(1+r) rounded by mode: the amount before tax or markup r was added.
+// The tax is gross less Net, so the two always sum to gross, while Gross of Net may
+// differ from gross by rounding. It never passes gross; false if mode is RoundExact and
+// the result is inexact. It panics on an invalid mode.
+func (r Rate) Net(gross uint64, mode Round) (uint64, bool) {
+	return MulDiv(gross, uint64(ppm_whole), r.plusWhole(), mode)
+}
+
+// plusWhole returns 1+r in parts per million, in 64 bits so that no Rate overflows it.
+func (r Rate) plusWhole() uint64 { return uint64(ppm_whole) + uint64(r) }
+
+// Compound returns amount·(1+r)^n, rounding by mode after each of the n periods, as a
+// contract settled every period does. A negative n discounts: amount/(1+r)^-n, rounded
+// the same way. False if it passes 2^64-1, or mode is RoundExact and a period is
+// inexact. It panics on an invalid mode.
+//
+// It takes one step per period, stopping early once a period leaves the amount
+// unchanged, as every later one then would.
+func (r Rate) Compound(amount uint64, n int, mode Round) (uint64, bool) {
+	fixed.CheckRound(mode)
+	step, towardZero := Rate.Gross, -1
+	if n < 0 {
+		step, towardZero = Rate.Net, 1
+	}
+	for ; n != 0; n += towardZero {
+		next, ok := step(r, amount, mode)
+		if !ok {
+			return 0, false
+		}
+		if next == amount {
+			break
+		}
+		amount = next
+	}
+	return amount, true
+}
+
 // ParseRate parses a percentage such as "21%" or "10.5%", or a fraction such as "0.21".
 // An error below one part per million, if negative, or past a uint32.
 func ParseRate(b []byte) (Rate, error) {

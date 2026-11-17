@@ -1,5 +1,11 @@
 package ledger
 
+// AccountBalance is an account's counters right after the transfer at Timestamp.
+type AccountBalance struct {
+	Balance
+	Timestamp int64
+}
+
 // Balance holds an account's four cumulative counters, in minor units of its ledger.
 type Balance struct {
 	DebitsPending  uint64 // reserved by pending transfers
