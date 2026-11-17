@@ -1,70 +1,35 @@
 package money
 
 import (
-	"math"
 	"math/bits"
 	"sync"
 
 	"github.com/soypat/ledger/internal/fixed"
 )
 
-// Price is an exact decimal V·10^Exp, as a market quotes an exchange rate: major units
-// of one currency per major unit of another, such as 1185.50 ARS per USD.
-type Price struct {
-	V   uint64
-	Exp int8
-}
-
-// ParsePrice parses decimal text such as "1185.50" exactly, keeping every digit:
-// {118550, -2}. Exp is that of the last digit but at most 0, so "1.5e3" is {1500, 0}.
-// An error on syntax as in [ParseAmount], or if negative, past 2^64-1, or Exp would
-// pass an int8.
-func ParsePrice(b []byte) (Price, error) {
-	e, err := fixed.Exp(b)
-	switch {
-	case err != 0:
-		return Price{}, err
-	case e < math.MinInt8:
-		return Price{}, fixed.ErrRange
-	}
-	exp := int8(min(e, 0))
-	v, err := fixed.Parse(b, exp, RoundExact) // keeps every digit, so it is never inexact
-	if err != 0 {
-		return Price{}, err
-	}
-	return Price{V: v, Exp: exp}, nil
-}
-
-// StringAppend appends p to dst with all its digits: {118550, -2} is "1185.50".
-// [ParsePrice] inverts it.
-func (p Price) StringAppend(dst []byte) []byte {
-	return fixed.Append(dst, p.V, p.Exp, false)
-}
-
-func (p Price) String() string { return string(p.StringAppend(nil)) }
-
 // Quote converts amounts of From into amounts of To at Price, in major units of To per
-// major unit of From. Make one with [NewQuote]; the zero Quote is invalid.
+// major unit of From. Make one with [NewQuote]; the zero Quote is invalid. Its fields
+// are read-only, since num and den are derived from them.
 type Quote[C Currency] struct {
-	From, To C
-	Price    Price
+	from, to C
+	price    Decimal
 	num, den uint64 // minor units of To per minor unit of From
 }
 
 // NewQuote returns the quote converting from into to at p, major units of to per
 // major unit of from. An error if p is zero, or with the currencies' exponents it
 // passes what a ratio of uint64 holds.
-func NewQuote[C Currency](from, to C, p Price) (Quote[C], error) {
-	if p.V == 0 {
+func NewQuote[C Currency](from, to C, p Decimal) (Quote[C], error) {
+	if p.v == 0 {
 		return Quote[C]{}, fixed.ErrRange
 	}
-	q := Quote[C]{From: from, To: to, Price: p, num: p.V, den: 1}
-	// v minor From is v·10^from.Exp major From, worth v·V·10^(from.Exp+p.Exp) major To,
-	// which is v·V·10^k minor To.
-	k := int(from.Exp()) + int(p.Exp) - int(to.Exp())
+	q := Quote[C]{from: from, to: to, price: p, num: p.v, den: 1}
+	// v minor From is v·10^from.Exp major From, worth v·p.v·10^(from.Exp+p.exp) major To,
+	// which is v·p.v·10^k minor To.
+	k := int(from.Exp()) + int(p.exp) - int(to.Exp())
 	if k >= 0 {
 		m, ok := fixed.Pow10(k)
-		hi, lo := bits.Mul64(p.V, m)
+		hi, lo := bits.Mul64(p.v, m)
 		if !ok || hi != 0 {
 			return Quote[C]{}, fixed.ErrRange
 		}
@@ -79,17 +44,29 @@ func NewQuote[C Currency](from, to C, p Price) (Quote[C], error) {
 	return q, nil
 }
 
-// Convert returns v minor units of From in minor units of To, rounded by mode, exact
-// through a 128-bit product; false if it passes 2^64-1, or mode is RoundExact and it
-// is inexact. It panics on an invalid mode or a Quote not made by NewQuote.
-func (q Quote[C]) Convert(v uint64, mode Round) (uint64, bool) {
-	v, err := q.convert(v, mode)
-	return v, err == 0
+// From returns the currency q converts from.
+func (q Quote[C]) From() C { return q.from }
+
+// To returns the currency q converts into.
+func (q Quote[C]) To() C { return q.to }
+
+// Price returns q's price, in major units of To per major unit of From.
+func (q Quote[C]) Price() Decimal { return q.price }
+
+// Convert returns a in To, rounded by mode, exact through a 128-bit product; invalid if
+// a is invalid, the result passes 2^64-1, or mode is RoundExact and it is inexact. It
+// panics if a is not in From, on an invalid mode, or on a Quote not made by NewQuote.
+func (q Quote[C]) Convert(a Amount[C], mode Round) Amount[C] {
+	v, err := q.convert(a, mode)
+	return Amount[C]{v: v, c: q.to, ok: a.ok && err == 0}
 }
 
-func (q *Quote[C]) convert(v uint64, mode Round) (uint64, fixed.Err) {
+func (q *Quote[C]) convert(a Amount[C], mode Round) (uint64, fixed.Err) {
 	q.mustValid()
-	return fixed.MulDiv(v, q.num, q.den, mode)
+	if a.c != q.from {
+		panic("money: Quote.Convert of " + a.c.Ticker() + " at a quote from " + q.from.Ticker())
+	}
+	return fixed.MulDiv(a.v, q.num, q.den, mode)
 }
 
 func (q *Quote[C]) mustValid() {
@@ -132,7 +109,7 @@ func (x *Exchange[C]) Set(q Quote[C]) error {
 	q.mustValid()
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if i := x.index(q.From, q.To); i >= 0 {
+	if i := x.index(q.from, q.to); i >= 0 {
 		x.quotes[i] = q
 		return nil
 	}
@@ -146,7 +123,7 @@ func (x *Exchange[C]) Set(q Quote[C]) error {
 // index returns the position of the quote from from into to, or -1. Hold mu.
 func (x *Exchange[C]) index(from, to C) int {
 	for i := range x.quotes {
-		if x.quotes[i].From == from && x.quotes[i].To == to {
+		if x.quotes[i].from == from && x.quotes[i].to == to {
 			return i
 		}
 	}
@@ -166,17 +143,25 @@ func (x *Exchange[C]) Quote(from, to C) (Quote[C], bool) {
 	return x.quotes[i], true
 }
 
-// Convert returns v minor units of from in minor units of to, rounded by mode, or v
-// itself if from equals to. An error if x has no quote from from into to, the result
-// passes 2^64-1, or mode is RoundExact and it is inexact. It panics on an invalid mode.
-func (x *Exchange[C]) Convert(from, to C, v uint64, mode Round) (uint64, error) {
+// Convert returns a in currency to, rounded by mode, or a itself if already in to. An
+// error, with an invalid Amount in to, if a is invalid, x has no quote from a's currency
+// into to, the result passes 2^64-1, or mode is RoundExact and it is inexact. It panics
+// on an invalid mode.
+func (x *Exchange[C]) Convert(a Amount[C], to C, mode Round) (Amount[C], error) {
 	fixed.CheckRound(mode)
-	if from == to {
-		return v, nil
+	switch {
+	case !a.ok:
+		return Amount[C]{c: to}, errInvalidAmount
+	case a.c == to:
+		return a, nil
 	}
-	q, ok := x.Quote(from, to)
+	q, ok := x.Quote(a.c, to)
 	if !ok {
-		return 0, errNoQuote
+		return Amount[C]{c: to}, errNoQuote
 	}
-	return result(q.convert(v, mode))
+	v, err := q.convert(a, mode)
+	if err != 0 {
+		return Amount[C]{c: to}, err
+	}
+	return FromMinor(to, v), nil
 }

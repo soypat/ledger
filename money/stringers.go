@@ -11,11 +11,13 @@ func _() {
 	_ = x[errUnknownCurrency-1]
 	_ = x[errNoQuote-2]
 	_ = x[errCapacity-3]
+	_ = x[errNegative-4]
+	_ = x[errInvalidAmount-5]
 }
 
-const _moneyErr_name = "unknown currencyno quote for currency paircapacity exceeded"
+const _moneyErr_name = "unknown currencyno quote for currency paircapacity exceedednegative unrepresentable in a ledgerinvalid amount"
 
-var _moneyErr_index = [...]uint8{0, 16, 42, 59}
+var _moneyErr_index = [...]uint8{0, 16, 42, 59, 95, 109}
 
 func (i moneyErr) String() string {
 	idx := int(i) - 1

@@ -3,7 +3,45 @@ package money
 import (
 	"math"
 	"testing"
+
+	"github.com/soypat/ledger/internal/fixed"
 )
+
+// cur is a caller-defined currency set, valued by ISO 4217 numeric code.
+type cur uint32
+
+const (
+	ars cur = 32
+	bhd cur = 48
+	jpy cur = 392
+	usd cur = 840
+)
+
+var curs = []cur{ars, bhd, jpy, usd}
+
+func (c cur) Exp() int8 {
+	switch c {
+	case jpy:
+		return 0
+	case bhd:
+		return -3
+	}
+	return -2
+}
+
+func (c cur) Ticker() string {
+	switch c {
+	case ars:
+		return "ARS"
+	case bhd:
+		return "BHD"
+	case jpy:
+		return "JPY"
+	case usd:
+		return "USD"
+	}
+	return "???"
+}
 
 func TestFromFloat(t *testing.T) {
 	cases := []struct {
@@ -22,34 +60,46 @@ func TestFromFloat(t *testing.T) {
 	}
 	for _, c := range cases {
 		got, err := FromFloat(c.c, c.v)
-		if err != nil {
-			panic(err)
-		}
-		if got.Minor() != c.want || got.Currency() != c.c {
-			t.Errorf("FromFloat(%s, %v) = %+v;  want V=%d", c.c.Ticker(), c.v, got, c.want)
+		if err != nil || !got.IsValid() || got.Minor() != c.want || got.Currency() != c.c {
+			t.Errorf("FromFloat(%s, %v) = %v, %v; want %d minor", c.c.Ticker(), c.v, got, err, c.want)
 		}
 	}
+	tenth := 0.1 // constants add exactly at compile time, so compute at run time
 	bad := []struct {
 		name string
 		c    cur
 		v    float64
+		err  error
 	}{
-		{"sub-minor digit", ars, 1.005},
-		{"negative", ars, -1},
-		{"negative zero is fine but -0.01 is not", ars, -0.01},
-		{"NaN", ars, math.NaN()},
-		{"+Inf", ars, math.Inf(1)},
-		{"-Inf", ars, math.Inf(-1)},
-		{"past 2^64 minor units", ars, 1e30},
-		{"yen with fraction", jpy, 1.5},
+		{"sub-minor digit", ars, 1.005, fixed.ErrInexact},
+		{"negative", ars, -1, errNegative},
+		{"negative zero is fine but -0.01 is not", ars, -0.01, errNegative},
+		{"NaN", ars, math.NaN(), fixed.ErrRange},
+		{"+Inf", ars, math.Inf(1), fixed.ErrRange},
+		{"-Inf", ars, math.Inf(-1), fixed.ErrRange},
+		{"past 2^64 minor units", ars, 1e30, fixed.ErrRange},
+		{"yen with fraction", jpy, 1.5, fixed.ErrInexact},
+		{"computed float", ars, tenth + 0.2, fixed.ErrInexact},
 	}
 	for _, c := range bad {
-		mustPanic(t, "FromFloat "+c.name, func() { FromFloat(c.c, c.v) })
+		if got, err := FromFloat(c.c, c.v); err != c.err || got.IsValid() {
+			t.Errorf("FromFloat %s = %v, %v; want invalid, %v", c.name, got, err, c.err)
+		}
 	}
-	tenth := 0.1 // constants add exactly at compile time, so compute at run time
-	mustPanic(t, "FromFloat computed float", func() { FromFloat(ars, tenth+0.2) })
-	if got, _ := FromFloat(ars, math.Copysign(0, -1)); got.Minor() != 0 {
-		t.Errorf("FromFloat(-0) = %+v; want 0", got)
+	if got, err := FromFloat(ars, math.Copysign(0, -1)); err != nil || !got.IsValid() || got.Minor() != 0 {
+		t.Errorf("FromFloat(-0) = %v, %v; want 0", got, err)
+	}
+}
+
+func TestAmountDecimal(t *testing.T) {
+	if got := FromMinor(ars, 12037).Decimal(); got != MakeDecimal(12037, -2) {
+		t.Errorf("120.37 ARS Decimal = %v", got)
+	}
+	if got := FromMinor(jpy, 1500).Decimal().String(); got != "1500" {
+		t.Errorf("1500 JPY Decimal = %q", got)
+	}
+	if got := Sub(FromMinor(ars, 1), FromMinor(ars, 2)).Decimal(); got != MakeDecimal(0, -2) {
+		t.Errorf("invalid Amount Decimal = %v; want 0", got)
 	}
 }
 
@@ -101,7 +151,8 @@ func TestAmountString(t *testing.T) {
 		if got := c.a.String(); got != c.want {
 			t.Errorf("%+v.String() = %q; want %q", c.a, got, c.want)
 		}
-		if got, err := ParseAmount([]byte(c.want[:len(c.want)-4]), c.a.Currency(), RoundExact); err != nil || got != c.a.Minor() {
+		got, err := fixed.Parse([]byte(c.want[:len(c.want)-4]), c.a.Currency().Exp(), RoundExact)
+		if err != 0 || got != c.a.Minor() {
 			t.Errorf("ParseAmount(%q) = %d, %v; want %d", c.want[:len(c.want)-4], got, err, c.a.Minor())
 		}
 	}

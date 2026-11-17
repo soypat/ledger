@@ -8,44 +8,10 @@ import (
 	"github.com/soypat/ledger/internal/fixed"
 )
 
-func TestPrice(t *testing.T) {
-	cases := []struct {
-		s    string
-		want Price
-		err  error
-	}{
-		{"1185.50", Price{118550, -2}, nil},
-		{"1185.5", Price{11855, -1}, nil},
-		{"15", Price{15, 0}, nil},
-		{"1.5e3", Price{1500, 0}, nil},
-		{"1e-3", Price{1, -3}, nil},
-		{"0.00084388", Price{84388, -8}, nil},
-		{"0", Price{0, 0}, nil},
-		{"18446744073709551615", Price{math.MaxUint64, 0}, nil},
-		{"18446744073709551616", Price{}, fixed.ErrRange},
-		{"1e-200", Price{}, fixed.ErrRange}, // Exp past an int8
-		{"1e99999", Price{}, fixed.ErrRange},
-		{"-1", Price{}, fixed.ErrRange},
-		{"x", Price{}, fixed.ErrSyntax},
-	}
-	for _, c := range cases {
-		got, err := ParsePrice([]byte(c.s))
-		if got != c.want || err != c.err {
-			t.Errorf("ParsePrice(%q) = %v, %v; want %v, %v", c.s, got, err, c.want, c.err)
-		}
-	}
-	for _, s := range []string{"1185.50", "0.00084388", "15", "0.001", "0"} {
-		p, _ := ParsePrice([]byte(s))
-		if got := p.String(); got != s {
-			t.Errorf("ParsePrice(%q).String() = %q", s, got)
-		}
-	}
-}
-
 func TestQuote(t *testing.T) {
 	quote := func(from, to cur, s string) Quote[cur] {
 		t.Helper()
-		p, err := ParsePrice([]byte(s))
+		p, err := ParseDecimal([]byte(s))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,23 +50,30 @@ func TestQuote(t *testing.T) {
 		{usdars, math.MaxUint64, RoundDown, 0, false},
 	}
 	for _, c := range cases {
-		got, ok := c.q.Convert(c.v, c.mode)
-		if got != c.want || ok != c.ok {
-			t.Errorf("%v→%v at %v: Convert(%d, %v) = %d, %v; want %d, %v",
-				c.q.From.Ticker(), c.q.To.Ticker(), c.q.Price, c.v, c.mode, got, ok, c.want, c.ok)
+		got := c.q.Convert(FromMinor(c.q.From(), c.v), c.mode)
+		if got.Minor() != c.want || got.IsValid() != c.ok || got.Currency() != c.q.To() {
+			t.Errorf("%v→%v at %v: Convert(%d, %v) = %v; want %d, %v",
+				c.q.From().Ticker(), c.q.To().Ticker(), c.q.Price(), c.v, c.mode, got, c.want, c.ok)
 		}
 	}
-	for _, p := range []Price{{0, 0}, {1, 20}, {1 << 62, 2}, {1, -30}} {
+	if got := usdars.Convert(Sub(FromMinor(usd, 1), FromMinor(usd, 2)), RoundDown); got.IsValid() {
+		t.Errorf("Convert of an invalid Amount = %v; want invalid", got)
+	}
+	if usdars.From() != usd || usdars.To() != ars || usdars.Price() != MakeDecimal(118550, -2) {
+		t.Errorf("USD→ARS quote reads %v→%v at %v", usdars.From().Ticker(), usdars.To().Ticker(), usdars.Price())
+	}
+	for _, p := range []Decimal{{0, 0}, {1, 20}, {1 << 62, 2}, {1, -30}} {
 		if _, err := NewQuote(usd, ars, p); err != fixed.ErrRange {
 			t.Errorf("NewQuote(USD, ARS, %v) err = %v; want fixed.ErrRange", p, err)
 		}
 	}
-	mustPanic(t, "Convert of the zero Quote", func() { Quote[cur]{}.Convert(1, RoundDown) })
-	mustPanic(t, "Convert mode 0", func() { usdars.Convert(1, 0) })
+	mustPanic(t, "Convert of the zero Quote", func() { Quote[cur]{}.Convert(FromMinor(usd, 1), RoundDown) })
+	mustPanic(t, "Convert mode 0", func() { usdars.Convert(FromMinor(usd, 1), 0) })
+	mustPanic(t, "Convert of the wrong currency", func() { usdars.Convert(FromMinor(ars, 1), RoundDown) })
 }
 
 func TestExchange(t *testing.T) {
-	mk := func(from, to cur, p Price) Quote[cur] {
+	mk := func(from, to cur, p Decimal) Quote[cur] {
 		q, err := NewQuote(from, to, p)
 		if err != nil {
 			t.Fatal(err)
@@ -108,7 +81,7 @@ func TestExchange(t *testing.T) {
 		return q
 	}
 	var r Exchange[cur]
-	if err := r.Set(mk(usd, ars, Price{1000, 0})); err != errCapacity {
+	if err := r.Set(mk(usd, ars, Decimal{1000, 0})); err != errCapacity {
 		t.Fatalf("Set on the zero Exchange err = %v; want errCapacity", err)
 	}
 	r.Configure(make([]Quote[cur], 0, 2))
@@ -116,18 +89,18 @@ func TestExchange(t *testing.T) {
 		q   Quote[cur]
 		err error
 	}{
-		{mk(usd, ars, Price{1000, 0}), nil},
-		{mk(ars, usd, Price{1, -3}), nil},
-		{mk(usd, jpy, Price{150, 0}), errCapacity},
-		{mk(usd, ars, Price{1200, 0}), nil}, // replaces, though full
+		{mk(usd, ars, Decimal{1000, 0}), nil},
+		{mk(ars, usd, Decimal{1, -3}), nil},
+		{mk(usd, jpy, Decimal{150, 0}), errCapacity},
+		{mk(usd, ars, Decimal{1200, 0}), nil}, // replaces, though full
 	}
 	for i, s := range steps {
 		if err := r.Set(s.q); err != s.err {
 			t.Errorf("step %d: Set err = %v; want %v", i, err, s.err)
 		}
 	}
-	if q, ok := r.Quote(usd, ars); !ok || q.Price != (Price{1200, 0}) {
-		t.Errorf("Quote(USD, ARS) = %v, %v; want the replacement", q.Price, ok)
+	if q, ok := r.Quote(usd, ars); !ok || q.Price() != (Decimal{1200, 0}) {
+		t.Errorf("Quote(USD, ARS) = %v, %v; want the replacement", q.Price(), ok)
 	}
 	if _, ok := r.Quote(usd, jpy); ok {
 		t.Error("Quote(USD, JPY) found a quote never stored")
@@ -148,20 +121,26 @@ func TestExchange(t *testing.T) {
 		{usd, jpy, 1, RoundExact, 0, errNoQuote},
 	}
 	for _, c := range converts {
-		got, err := r.Convert(c.from, c.to, c.v, c.mode)
-		if got != c.want || err != c.err {
-			t.Errorf("Convert(%v, %v, %d, %v) = %d, %v; want %d, %v",
-				c.from.Ticker(), c.to.Ticker(), c.v, c.mode, got, err, c.want, c.err)
+		got, err := r.Convert(FromMinor(c.from, c.v), c.to, c.mode)
+		if got.Minor() != c.want || got.IsValid() != (c.err == nil) || got.Currency() != c.to || err != c.err {
+			t.Errorf("Convert(%d %v to %v, %v) = %v, %v; want %d, %v",
+				c.v, c.from.Ticker(), c.to.Ticker(), c.mode, got, err, c.want, c.err)
+		}
+	}
+	invalid := Sub(FromMinor(usd, 1), FromMinor(usd, 2))
+	for _, to := range []cur{ars, usd} {
+		if got, err := r.Convert(invalid, to, RoundDown); got.IsValid() || err != errInvalidAmount {
+			t.Errorf("Convert(invalid USD to %v) = %v, %v; want invalid, errInvalidAmount", to.Ticker(), got, err)
 		}
 	}
 	mustPanic(t, "Set of the zero Quote", func() { r.Set(Quote[cur]{}) })
-	mustPanic(t, "Convert mode 0", func() { r.Convert(usd, usd, 1, 0) })
+	mustPanic(t, "Convert mode 0", func() { r.Convert(FromMinor(usd, 1), usd, 0) })
 
-	q := mk(usd, ars, Price{1300, 0})
+	q := mk(usd, ars, Decimal{1300, 0})
 	if n := testing.AllocsPerRun(100, func() { r.Set(q) }); n != 0 {
 		t.Errorf("Set allocates %v times", n)
 	}
-	if n := testing.AllocsPerRun(100, func() { r.Convert(usd, ars, 12345, RoundHalfEven) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { r.Convert(FromMinor(usd, 12345), ars, RoundHalfEven) }); n != 0 {
 		t.Errorf("Convert allocates %v times", n)
 	}
 
@@ -186,7 +165,7 @@ func TestExchangeRace(t *testing.T) {
 	for i := range quotes {
 		zeros := i % 3
 		v := uint64(1000+i) * [3]uint64{1, 10, 100}[zeros]
-		q, err := NewQuote(usd, ars, Price{V: v, Exp: int8(-zeros)})
+		q, err := NewQuote(usd, ars, Decimal{v: v, exp: int8(-zeros)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,13 +193,13 @@ func TestExchangeRace(t *testing.T) {
 					t.Error("Quote(USD, ARS) missing")
 					return
 				}
-				got, err := x.Convert(usd, ars, 1, RoundExact) // 1 cent is 1000+i centavos
+				got, err := x.Convert(FromMinor(usd, 1), ars, RoundExact) // 1 cent is 1000+i centavos
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				if !validConvert(quotes[:], q, got) {
-					t.Errorf("Convert = %d with quote %v", got, q.Price)
+				if !validConvert(quotes[:], q, got.Minor()) {
+					t.Errorf("Convert = %v with quote %v", got, q.Price())
 					return
 				}
 			}
@@ -228,7 +207,7 @@ func TestExchangeRace(t *testing.T) {
 	}
 	wg.Wait()
 	x.Reset()
-	if _, err := x.Convert(usd, ars, 100, RoundDown); err != errNoQuote {
+	if _, err := x.Convert(FromMinor(usd, 100), ars, RoundDown); err != errNoQuote {
 		t.Errorf("after Reset Convert err = %v; want errNoQuote", err)
 	}
 }

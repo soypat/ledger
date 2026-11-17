@@ -7,10 +7,37 @@
 // Currencies are the caller's own type; see [Currency].
 package money
 
-import "github.com/soypat/ledger/internal/fixed"
+import (
+	"math"
+
+	"github.com/soypat/ledger/internal/fixed"
+)
 
 // Add all enum-like types to money.go and to the following go:generate command:
 //go:generate stringer -type=moneyErr -linecomment -output stringers.go
+
+// Currency is a set of currencies the caller defines, such as
+//
+//	type Currency uint32
+//
+//	const (
+//		ARS Currency = 32  // ISO 4217 numeric codes make good ledger numbers;
+//		USD Currency = 840 // 0 is not one, as the ledger rejects it.
+//	)
+//
+// A value is the ledger number of the accounts that hold it: Account.Ledger and
+// Transfer.Ledger in package ledger. Money needs only a currency's exponent and ticker;
+// conversion between currencies is [Exchange]. Package money/iso4217 has every
+// ISO 4217 currency ready-made.
+type Currency interface {
+	~uint32
+	// Exp is the minor-unit exponent, fixed per value: -2 for cents, 0 for JPY,
+	// -3 for BHD.
+	Exp() int8
+	// Ticker is the code naming the currency in text, such as "USD". Return a
+	// constant, so that calling it does not allocate.
+	Ticker() string
+}
 
 // moneyErr is why an operation failed. Returning one does not allocate.
 type moneyErr uint8
@@ -21,6 +48,7 @@ const (
 	errNoQuote                  // no quote for currency pair
 	errCapacity                 // capacity exceeded
 	errNegative                 // negative unrepresentable in a ledger
+	errInvalidAmount            // invalid amount
 )
 
 func (e moneyErr) Error() string { return e.String() }
@@ -53,3 +81,46 @@ func result(v uint64, err fixed.Err) (uint64, error) {
 	}
 	return v, nil
 }
+
+// Decimal is an exact decimal v·10^exp, for numbers quoted with more digits than a
+// currency's minor unit, such as an exchange rate (see [Quote]). It keeps every digit it
+// was given, so == compares digits, not values: 1185.5 and 1185.50 are not ==. The zero
+// Decimal is 0.
+type Decimal struct {
+	v   uint64
+	exp int8
+}
+
+// MakeDecimal returns v·10^exp: MakeDecimal(118550, -2) is 1185.50.
+func MakeDecimal(v uint64, exp int8) Decimal { return Decimal{v: v, exp: exp} }
+
+// Parts returns the v and exp d is v·10^exp of, as [MakeDecimal] takes them.
+func (d Decimal) Parts() (v uint64, exp int8) { return d.v, d.exp }
+
+// ParseDecimal parses decimal text such as "1185.50" exactly, keeping every digit:
+// MakeDecimal(118550, -2). The exponent is that of the last digit but at most 0, so
+// "1.5e3" is MakeDecimal(1500, 0). An error on syntax as in [ParseAmount], or if
+// negative, past 2^64-1, or the exponent would pass an int8.
+func ParseDecimal(b []byte) (Decimal, error) {
+	e, err := fixed.Exp(b)
+	switch {
+	case err != 0:
+		return Decimal{}, err
+	case e < math.MinInt8:
+		return Decimal{}, fixed.ErrRange
+	}
+	exp := int8(min(e, 0))
+	v, err := fixed.Parse(b, exp, RoundExact) // keeps every digit, so it is never inexact
+	if err != 0 {
+		return Decimal{}, err
+	}
+	return Decimal{v: v, exp: exp}, nil
+}
+
+// StringAppend appends d to dst with all its digits: MakeDecimal(118550, -2) is
+// "1185.50". [ParseDecimal] inverts it.
+func (d Decimal) StringAppend(dst []byte) []byte {
+	return fixed.Append(dst, d.v, d.exp, false)
+}
+
+func (d Decimal) String() string { return string(d.StringAppend(nil)) }

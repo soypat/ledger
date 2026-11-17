@@ -3,8 +3,45 @@ package money
 import (
 	"math"
 	"testing"
+
+	"github.com/soypat/ledger/internal/fixed"
 )
 
+// cur is a caller-defined currency set, valued by ISO 4217 numeric code.
+type cur uint32
+
+const (
+	ars cur = 32
+	bhd cur = 48
+	jpy cur = 392
+	usd cur = 840
+)
+
+var curs = []cur{ars, bhd, jpy, usd}
+
+func (c cur) Exp() int8 {
+	switch c {
+	case jpy:
+		return 0
+	case bhd:
+		return -3
+	}
+	return -2
+}
+
+func (c cur) Ticker() string {
+	switch c {
+	case ars:
+		return "ARS"
+	case bhd:
+		return "BHD"
+	case jpy:
+		return "JPY"
+	case usd:
+		return "USD"
+	}
+	return "???"
+}
 func mustPanic(t *testing.T, name string, f func()) {
 	t.Helper()
 	defer func() {
@@ -32,5 +69,54 @@ func TestMulDiv(t *testing.T) {
 	}
 	if got := errNoQuote.Error(); got != "no quote for currency pair" {
 		t.Errorf("errNoQuote.Error() = %q", got)
+	}
+	if got := errNegative.Error(); got != "negative unrepresentable in a ledger" {
+		t.Errorf("errNegative.Error() = %q", got)
+	}
+	if got := errInvalidAmount.Error(); got != "invalid amount" {
+		t.Errorf("errInvalidAmount.Error() = %q", got)
+	}
+}
+
+func TestDecimal(t *testing.T) {
+	cases := []struct {
+		s    string
+		want Decimal
+		err  error
+	}{
+		{"1185.50", Decimal{118550, -2}, nil},
+		{"1185.5", Decimal{11855, -1}, nil},
+		{"15", Decimal{15, 0}, nil},
+		{"1.5e3", Decimal{1500, 0}, nil},
+		{"1e-3", Decimal{1, -3}, nil},
+		{"0.00084388", Decimal{84388, -8}, nil},
+		{"0", Decimal{0, 0}, nil},
+		{"18446744073709551615", Decimal{math.MaxUint64, 0}, nil},
+		{"18446744073709551616", Decimal{}, fixed.ErrRange},
+		{"1e-200", Decimal{}, fixed.ErrRange}, // exponent past an int8
+		{"1e99999", Decimal{}, fixed.ErrRange},
+		{"-1", Decimal{}, fixed.ErrRange},
+		{"x", Decimal{}, fixed.ErrSyntax},
+	}
+	for _, c := range cases {
+		got, err := ParseDecimal([]byte(c.s))
+		if got != c.want || err != c.err {
+			t.Errorf("ParseDecimal(%q) = %v, %v; want %v, %v", c.s, got, err, c.want, c.err)
+		}
+	}
+	for _, s := range []string{"1185.50", "0.00084388", "15", "0.001", "0"} {
+		d, _ := ParseDecimal([]byte(s))
+		if got := d.String(); got != s {
+			t.Errorf("ParseDecimal(%q).String() = %q", s, got)
+		}
+		if v, exp := d.Parts(); MakeDecimal(v, exp) != d {
+			t.Errorf("MakeDecimal(%d, %d) != ParseDecimal(%q)", v, exp, s)
+		}
+	}
+	if got := MakeDecimal(15, 2).String(); got != "1500" {
+		t.Errorf("MakeDecimal(15, 2) = %q; want 1500", got)
+	}
+	if a, b := MakeDecimal(11855, -1), MakeDecimal(118550, -2); a == b {
+		t.Errorf("%v == %v; == compares digits, not values", a, b)
 	}
 }

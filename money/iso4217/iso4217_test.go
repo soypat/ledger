@@ -3,8 +3,6 @@ package iso4217
 import (
 	"math"
 	"testing"
-
-	"github.com/soypat/ledger/money"
 )
 
 // TestTable checks what find relies on and what every ISO 4217 code satisfies.
@@ -87,40 +85,5 @@ func TestCurrency(t *testing.T) {
 
 	if n := testing.AllocsPerRun(100, func() { _, _, _ = USD.Ticker(), USD.Exp(), USD.Valid() }); n != 0 {
 		t.Errorf("Ticker, Exp and Valid allocate %v times", n)
-	}
-}
-
-// TestMoney uses Currency as package money's currency type.
-func TestMoney(t *testing.T) {
-	parse := []struct {
-		s    string
-		c    Currency
-		mode money.Round
-		want uint64
-	}{
-		{"1234.56", USD, money.RoundExact, 123456},
-		{"1234.56", JPY, money.RoundHalfEven, 1235},
-		{"1.005", BHD, money.RoundExact, 1005},
-		{"1.2345", CLF, money.RoundExact, 12345},
-		{"3", XAU, money.RoundExact, 3},
-	}
-	for _, c := range parse {
-		if got, err := money.ParseAmount([]byte(c.s), c.c, c.mode); got != c.want || err != nil {
-			t.Errorf("ParseAmount(%q, %s) = %d, %v; want %d", c.s, c.c.Ticker(), got, err, c.want)
-		}
-		if c.mode != money.RoundExact {
-			continue // text was rounded, so it does not come back
-		}
-		if got := string(money.AppendAmount(nil, c.want, c.c)); got != c.s {
-			t.Errorf("AppendAmount(%d, %s) = %q; want %q", c.want, c.c.Ticker(), got, c.s)
-		}
-	}
-
-	set := []Currency{ARS, EUR, USD}
-	if got, err := money.ParseTicker([]byte("EUR"), set); got != EUR || err != nil {
-		t.Errorf("ParseTicker(EUR) = %d, %v", got, err)
-	}
-	if _, err := money.ParseTicker([]byte("JPY"), set); err == nil {
-		t.Error("ParseTicker(JPY) found a currency outside the set")
 	}
 }
