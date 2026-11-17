@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 // Rate is a fraction in parts per million: 210_000 is 21%. It may exceed PPM, as a

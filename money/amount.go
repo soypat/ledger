@@ -4,7 +4,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 // Amount is a count of minor units of a currency: 12037 ARS is 120.37 ARS. It is

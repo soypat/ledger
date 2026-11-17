@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 func TestQuote(t *testing.T) {
@@ -53,14 +53,15 @@ func TestQuote(t *testing.T) {
 		got := c.q.Convert(FromMinor(c.q.From(), c.v), c.mode)
 		if got.Minor() != c.want || got.IsValid() != c.ok || got.Currency() != c.q.To() {
 			t.Errorf("%v→%v at %v: Convert(%d, %v) = %v; want %d, %v",
-				c.q.From().Ticker(), c.q.To().Ticker(), c.q.Price(), c.v, c.mode, got, c.want, c.ok)
+				c.q.From().Ticker(), c.q.To().Ticker(), price(c.q), c.v, c.mode, got, c.want, c.ok)
 		}
 	}
 	if got := usdars.Convert(Sub(FromMinor(usd, 1), FromMinor(usd, 2)), RoundDown); got.IsValid() {
 		t.Errorf("Convert of an invalid Amount = %v; want invalid", got)
 	}
-	if usdars.From() != usd || usdars.To() != ars || usdars.Price() != MakeDecimal(118550, -2) {
-		t.Errorf("USD→ARS quote reads %v→%v at %v", usdars.From().Ticker(), usdars.To().Ticker(), usdars.Price())
+	if base, counter, p := usdars.Rate(); usdars.From() != usd || usdars.To() != ars ||
+		base != usd || counter != ars || p != MakeDecimal(118550, -2) {
+		t.Errorf("USD→ARS quote reads %v→%v at %v/%v %v", usdars.From().Ticker(), usdars.To().Ticker(), base.Ticker(), counter.Ticker(), p)
 	}
 	for _, p := range []Decimal{{0, 0}, {1, 20}, {1 << 62, 2}, {1, -30}} {
 		if _, err := NewQuote(usd, ars, p); err != fixed.ErrRange {
@@ -70,6 +71,76 @@ func TestQuote(t *testing.T) {
 	mustPanic(t, "Convert of the zero Quote", func() { Quote[cur]{}.Convert(FromMinor(usd, 1), RoundDown) })
 	mustPanic(t, "Convert mode 0", func() { usdars.Convert(FromMinor(usd, 1), 0) })
 	mustPanic(t, "Convert of the wrong currency", func() { usdars.Convert(FromMinor(ars, 1), RoundDown) })
+}
+
+func TestQuoteInverse(t *testing.T) {
+	p := Decimal{V: 1387}
+	fwd, err := NewQuote(usd, ars, p) // 1387 ARS per USD
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := fwd.Inverse()
+	// The inverse converts the other way but reads the same pair: USD/ARS 1387.
+	if base, counter, qp := q.Rate(); q.From() != ars || q.To() != usd || base != usd || counter != ars || qp != p {
+		t.Errorf("inverse quote %v→%v reads %v/%v %v", q.From().Ticker(), q.To().Ticker(), base.Ticker(), counter.Ticker(), qp)
+	}
+	if fb, fc, fp := fwd.Rate(); fb != usd || fc != ars || fp != p {
+		t.Errorf("forward quote reads %v/%v %v", fb.Ticker(), fc.Ticker(), fp)
+	}
+	if num, den := q.Ratio(); num != 1 || den != 1387 {
+		t.Errorf("Ratio = %d/%d; want 1/1387", num, den)
+	}
+	if back := q.Inverse(); back != fwd {
+		t.Errorf("inverse of the inverse = %+v; want %+v", back, fwd)
+	}
+	// Rate rebuilds either quote: NewQuote(base, counter, price), inverted if base is not From.
+	for _, orig := range []Quote[cur]{fwd, q} {
+		base, counter, rp := orig.Rate()
+		rebuilt, err := NewQuote(base, counter, rp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if base != orig.From() {
+			rebuilt = rebuilt.Inverse()
+		}
+		if rebuilt != orig {
+			t.Errorf("rebuilt %+v; want %+v", rebuilt, orig)
+		}
+	}
+	cases := []struct {
+		v    uint64
+		mode Round
+		want uint64
+		ok   bool
+	}{
+		{138700, RoundExact, 100, true}, // 1387 ARS is 1 USD
+		{277400, RoundExact, 200, true},
+		{100000, RoundHalfEven, 72, true}, // 1000 ARS is 0.7209… USD
+		{100000, RoundUp, 73, true},
+		{100000, RoundExact, 0, false},
+	}
+	for _, c := range cases {
+		got := q.Convert(FromMinor(ars, c.v), c.mode)
+		if got.Minor() != c.want || got.IsValid() != c.ok || got.Currency() != usd {
+			t.Errorf("Convert(%d ARS, %v) = %v; want %d, %v", c.v, c.mode, got, c.want, c.ok)
+		}
+		// Converting back at the forward quote restores the pesos when nothing was rounded.
+		if c.mode == RoundExact && c.ok {
+			if back := fwd.Convert(got, RoundExact); back.Minor() != c.v {
+				t.Errorf("round trip of %d ARS = %v", c.v, back)
+			}
+		}
+	}
+	var x Exchange[cur]
+	x.Configure(make([]Quote[cur], 0, 2))
+	if err := x.Set(q); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := x.Convert(FromMinor(ars, 277400), usd, RoundExact); err != nil || got.Minor() != 200 {
+		t.Errorf("Exchange.Convert at an inverse quote = %v, %v", got, err)
+	}
+	mustPanic(t, "Ratio of the zero Quote", func() { Quote[cur]{}.Ratio() })
+	mustPanic(t, "Inverse of the zero Quote", func() { Quote[cur]{}.Inverse() })
 }
 
 func TestExchange(t *testing.T) {
@@ -99,8 +170,8 @@ func TestExchange(t *testing.T) {
 			t.Errorf("step %d: Set err = %v; want %v", i, err, s.err)
 		}
 	}
-	if q, ok := r.Quote(usd, ars); !ok || q.Price() != (Decimal{1200, 0}) {
-		t.Errorf("Quote(USD, ARS) = %v, %v; want the replacement", q.Price(), ok)
+	if q, ok := r.Quote(usd, ars); !ok || price(q) != (Decimal{1200, 0}) {
+		t.Errorf("Quote(USD, ARS) = %v, %v; want the replacement", price(q), ok)
 	}
 	if _, ok := r.Quote(usd, jpy); ok {
 		t.Error("Quote(USD, JPY) found a quote never stored")
@@ -199,7 +270,7 @@ func TestExchangeRace(t *testing.T) {
 					return
 				}
 				if !validConvert(quotes[:], q, got.Minor()) {
-					t.Errorf("Convert = %v with quote %v", got, q.Price())
+					t.Errorf("Convert = %v with quote %v", got, price(q))
 					return
 				}
 			}
@@ -226,4 +297,10 @@ func MakeDecimal(v uint64, exp int8) Decimal {
 }
 func (d Decimal) Parts() (uint64, int8) {
 	return d.V, d.Exp
+}
+
+// price is q's quoted price, for messages.
+func price(q Quote[cur]) Decimal {
+	_, _, p := q.Rate()
+	return p
 }

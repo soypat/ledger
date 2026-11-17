@@ -4,15 +4,17 @@ import (
 	"math/bits"
 	"sync"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
-// Quote converts amounts of From into amounts of To at Price, in major units of To per
-// major unit of From. Make one with [NewQuote]; the zero Quote is invalid. Its fields
-// are read-only, since num and den are derived from them.
+// Quote converts amounts of From into amounts of To at the price [Quote.Rate] reports.
+// Make one with [NewQuote], and one converting the other way with [Quote.Inverse]; the
+// zero Quote is invalid. Its fields are read-only, since num and den are
+// derived from them.
 type Quote[C Currency] struct {
 	from, to C
 	price    Decimal
+	inverse  bool   // price is From per To: q is NewQuote(to, from, price).Inverse()
 	num, den uint64 // minor units of To per minor unit of From
 }
 
@@ -50,8 +52,28 @@ func (q Quote[C]) From() C { return q.from }
 // To returns the currency q converts into.
 func (q Quote[C]) To() C { return q.to }
 
-// Price returns q's price, in major units of To per major unit of From.
-func (q Quote[C]) Price() Decimal { return q.price }
+// Rate returns q's original quote before inversion if applied.
+func (q Quote[C]) Rate() (base, counter C, price Decimal) {
+	if q.inverse {
+		return q.to, q.from, q.price
+	}
+	return q.from, q.to, q.price
+}
+
+// Inverse returns exact quote converting To into From at the same price. The inverse of the inverse is original Quote.
+func (q Quote[C]) Inverse() Quote[C] {
+	q.mustValid()
+	q.from, q.to, q.num, q.den, q.inverse = q.to, q.from, q.den, q.num, !q.inverse
+	return q
+}
+
+// Ratio returns q as minor units of To per minor unit of From, num/den, for callers
+// folding the conversion into a larger multiply-divide that rounds once. It panics on a
+// Quote not made by NewQuote.
+func (q Quote[C]) Ratio() (num, den uint64) {
+	q.mustValid()
+	return q.num, q.den
+}
 
 // Convert returns a in To, rounded by mode, exact through a 128-bit product; invalid if
 // a is invalid, the result passes 2^64-1, or mode is RoundExact and it is inexact. It

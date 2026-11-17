@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 // cur is a caller-defined currency set, valued by ISO 4217 numeric code.

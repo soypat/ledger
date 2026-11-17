@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 func TestRate(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 func mustPanic(t *testing.T, name string, f func()) {

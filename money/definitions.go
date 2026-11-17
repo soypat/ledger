@@ -10,7 +10,7 @@ package money
 import (
 	"math"
 
-	"github.com/soypat/ledger/internal/fixed"
+	"github.com/soypat/ledger/fixed"
 )
 
 // Add all enum-like types to money.go and to the following go:generate command:
