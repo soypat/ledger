@@ -175,6 +175,36 @@ func TestMulDiv(t *testing.T) {
 	}
 }
 
+func TestRoundTo(t *testing.T) {
+	cases := []struct {
+		v, step uint64
+		mode    Round
+		want    uint64
+		err     Err
+	}{
+		{2460, 100, RoundUp, 2500, 0},
+		{2460, 100, RoundDown, 2400, 0},
+		{2450, 100, RoundHalfEven, 2400, 0},
+		{2550, 100, RoundHalfEven, 2600, 0},
+		{2450, 100, RoundHalfAway, 2500, 0},
+		{2500, 100, RoundExact, 2500, 0},
+		{2460, 100, RoundExact, 0, ErrInexact},
+		{0, 100, RoundUp, 0, 0},
+		{7, 1, RoundExact, 7, 0},
+		{math.MaxUint64, 10, RoundDown, math.MaxUint64 / 10 * 10, 0},
+		{math.MaxUint64, 10, RoundUp, 0, ErrRange}, // the next multiple passes 2^64-1
+		{math.MaxUint64, math.MaxUint64, RoundExact, math.MaxUint64, 0},
+	}
+	for _, c := range cases {
+		got, err := RoundTo(c.v, c.step, c.mode)
+		if got != c.want || err != c.err {
+			t.Errorf("RoundTo(%d, %d, %v) = %d, %v; want %d, %v", c.v, c.step, c.mode, got, err, c.want, c.err)
+		}
+	}
+	mustPanic(t, "step 0", func() { RoundTo(1, 0, RoundDown) })
+	mustPanic(t, "mode 0", func() { RoundTo(1, 1, 0) })
+}
+
 func TestCheckRound(t *testing.T) {
 	for m := RoundExact; m < roundMax; m++ {
 		CheckRound(m)

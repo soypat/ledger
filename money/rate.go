@@ -20,14 +20,16 @@ const (
 // Of returns amount·r rounded by mode; false if it passes 2^64-1, or mode is RoundExact
 // and the result is inexact. It panics on an invalid mode.
 func (r Rate) Of(amount uint64, mode Round) (uint64, bool) {
-	return mulDiv(amount, uint64(r), uint64(ppm_whole), mode)
+	v, err := fixed.MulDiv(amount, uint64(r), uint64(ppm_whole), mode)
+	return v, err == 0
 }
 
 // Gross returns net·(1+r) rounded by mode: an amount with tax or markup r added. False
 // if it passes 2^64-1, or mode is RoundExact and the result is inexact. It panics on an
 // invalid mode.
 func (r Rate) Gross(net uint64, mode Round) (uint64, bool) {
-	return mulDiv(net, r.plusWhole(), uint64(ppm_whole), mode)
+	v, err := fixed.MulDiv(net, r.plusWhole(), uint64(ppm_whole), mode)
+	return v, err == 0
 }
 
 // Net returns gross/(1+r) rounded by mode: the amount before tax or markup r was added.
@@ -35,7 +37,8 @@ func (r Rate) Gross(net uint64, mode Round) (uint64, bool) {
 // differ from gross by rounding. It never passes gross; false if mode is RoundExact and
 // the result is inexact. It panics on an invalid mode.
 func (r Rate) Net(gross uint64, mode Round) (uint64, bool) {
-	return mulDiv(gross, uint64(ppm_whole), r.plusWhole(), mode)
+	v, err := fixed.MulDiv(gross, uint64(ppm_whole), r.plusWhole(), mode)
+	return v, err == 0
 }
 
 // plusWhole returns 1+r in parts per million, in 64 bits so that no Rate overflows it.
@@ -138,5 +141,6 @@ func (x *Index) Adjust(amount uint64, from, to Month, mode Round) (uint64, bool)
 	if !okf || !okt {
 		return 0, false
 	}
-	return mulDiv(amount, t, f, mode)
+	v, err := fixed.MulDiv(amount, t, f, mode)
+	return v, err == 0
 }

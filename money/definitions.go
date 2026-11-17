@@ -65,23 +65,6 @@ const (
 	RoundHalfEven = fixed.RoundHalfEven // to nearest, half to even
 )
 
-// mulDiv returns a·num/den rounded by mode, exact through a 128-bit product; false if
-// the result passes 2^64-1, or mode is RoundExact and the division is inexact.
-// It panics on den == 0 or an invalid mode.
-func mulDiv(a, num, den uint64, mode Round) (uint64, bool) {
-	v, err := fixed.MulDiv(a, num, den, mode)
-	return v, err == 0
-}
-
-// result returns a fixed result as money's, with a nil error on success: a zero
-// fixed.Err in an error interface would not be nil.
-func result(v uint64, err fixed.Err) (uint64, error) {
-	if err != 0 {
-		return 0, err
-	}
-	return v, nil
-}
-
 // Grouping is how decimal text is written for display: Group between every three
 // integer digits and Point before the fraction. es-AR is {'.', ','} and en-US is
 // {',', '.'}. A zero Group writes no marks and a zero Point writes '.', so the zero

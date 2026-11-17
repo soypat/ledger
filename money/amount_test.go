@@ -129,7 +129,49 @@ func TestAmountArithmetic(t *testing.T) {
 	if p := top.Mul(1); !p.IsValid() || p != top {
 		t.Errorf("Mul by 1 at the limit = %+v", p)
 	}
+	if p := Sub(a, b).Mul(1); p.IsValid() {
+		t.Errorf("Mul of an invalid Amount = %+v; want invalid", p)
+	}
+	thousand := FromMinor(ars, 100000) // 1000.00 over 3, 2/3 and 7 ways
+	for _, c := range []struct {
+		num, den uint64
+		mode     Round
+		want     uint64
+		err      fixed.Err
+	}{
+		{1, 3, RoundHalfEven, 33333, 0},
+		{2, 3, RoundHalfEven, 66667, 0},
+		{2, 3, RoundDown, 66666, 0},
+		{1, 3, RoundExact, 0, fixed.ErrInexact},
+		{1, 4, RoundExact, 25000, 0},
+		{math.MaxUint64, 1, RoundDown, 0, fixed.ErrRange},
+	} {
+		got, err := thousand.MulDiv(c.num, c.den, c.mode)
+		if err != c.err || got.IsValid() != (c.err == 0) || (c.err == 0 && got != FromMinor(ars, c.want)) {
+			t.Errorf("MulDiv(%d, %d, %v) = %+v, %v; want %d, %v", c.num, c.den, c.mode, got, err, c.want, c.err)
+		}
+	}
+	if got, err := Sub(a, b).MulDiv(1, 1, RoundExact); err != 0 || got.IsValid() {
+		t.Errorf("MulDiv of an invalid Amount = %+v, %v; want invalid, no error of its own", got, err)
+	}
+	mustPanic(t, "MulDiv by zero", func() { a.MulDiv(1, 0, RoundDown) })
+	mustPanic(t, "MulDiv mode 0", func() { a.MulDiv(1, 1, 0) })
+	hundred := FromMinor(ars, 10000)
+	if r, err := FromMinor(ars, 246000).RoundTo(hundred, RoundUp); err != 0 || r != FromMinor(ars, 250000) {
+		t.Errorf("RoundTo up = %+v, %v", r, err)
+	}
+	if r, err := FromMinor(ars, 246000).RoundTo(hundred, RoundExact); err != fixed.ErrInexact || r.IsValid() {
+		t.Errorf("RoundTo exact of an inexact = %+v, %v", r, err)
+	}
+	if r, err := top.RoundTo(hundred, RoundUp); err != fixed.ErrRange || r.IsValid() {
+		t.Errorf("RoundTo past 2^64-1 = %+v, %v", r, err)
+	}
+	if r, _ := FromMinor(ars, 1).RoundTo(Sub(a, b), RoundUp); r.IsValid() {
+		t.Errorf("RoundTo an invalid step = %+v; want invalid", r)
+	}
 	usd := FromMinor(usd, 1)
+	mustPanic(t, "RoundTo across currencies", func() { a.RoundTo(usd, RoundUp) })
+	mustPanic(t, "RoundTo a zero step", func() { a.RoundTo(FromMinor(ars, 0), RoundUp) })
 	mustPanic(t, "Add across currencies", func() { Add(a, usd) })
 	mustPanic(t, "Sub across currencies", func() { Sub(a, usd) })
 }

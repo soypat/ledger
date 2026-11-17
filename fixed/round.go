@@ -111,3 +111,22 @@ func MulDiv(a, num, den uint64, mode Round) (uint64, Err) {
 	}
 	return roundUp(q, t, mode)
 }
+
+// RoundTo returns v rounded by mode to a multiple of step, such as a price up to the next
+// hundred: RoundTo(2460, 100, RoundUp) is 2500. ErrRange if the result passes 2^64-1,
+// ErrInexact if mode is RoundExact and v is no multiple of step. It panics on step == 0
+// or an invalid mode.
+func RoundTo(v, step uint64, mode Round) (uint64, Err) {
+	if step == 0 {
+		panic("fixed: RoundTo a step of zero")
+	}
+	n, err := MulDiv(v, 1, step, mode)
+	if err != 0 {
+		return 0, err
+	}
+	hi, lo := bits.Mul64(n, step)
+	if hi != 0 {
+		return 0, ErrRange
+	}
+	return lo, 0
+}
