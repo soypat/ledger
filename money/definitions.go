@@ -20,6 +20,7 @@ const (
 	errUnknownCurrency          // unknown currency
 	errNoQuote                  // no quote for currency pair
 	errCapacity                 // capacity exceeded
+	errNegative                 // negative unrepresentable in a ledger
 )
 
 func (e moneyErr) Error() string { return e.String() }
@@ -36,10 +37,10 @@ const (
 	RoundHalfEven = fixed.RoundHalfEven // to nearest, half to even
 )
 
-// MulDiv returns a·num/den rounded by mode, exact through a 128-bit product; false if
+// mulDiv returns a·num/den rounded by mode, exact through a 128-bit product; false if
 // the result passes 2^64-1, or mode is RoundExact and the division is inexact.
 // It panics on den == 0 or an invalid mode.
-func MulDiv(a, num, den uint64, mode Round) (uint64, bool) {
+func mulDiv(a, num, den uint64, mode Round) (uint64, bool) {
 	v, err := fixed.MulDiv(a, num, den, mode)
 	return v, err == 0
 }
