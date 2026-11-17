@@ -82,25 +82,28 @@ func result(v uint64, err fixed.Err) (uint64, error) {
 	return v, nil
 }
 
+// Grouping is how decimal text is written for display: Group between every three
+// integer digits and Point before the fraction. es-AR is {'.', ','} and en-US is
+// {',', '.'}. A zero Group writes no marks and a zero Point writes '.', so the zero
+// Grouping writes plain text, as String does.
+type Grouping struct {
+	Group, Point byte
+}
+
 // Decimal is an exact decimal v·10^exp, for numbers quoted with more digits than a
 // currency's minor unit, such as an exchange rate (see [Quote]). It keeps every digit it
 // was given, so == compares digits, not values: 1185.5 and 1185.50 are not ==. The zero
 // Decimal is 0.
 type Decimal struct {
-	v   uint64
-	exp int8
+	V   uint64
+	Exp int8
 }
-
-// MakeDecimal returns v·10^exp: MakeDecimal(118550, -2) is 1185.50.
-func MakeDecimal(v uint64, exp int8) Decimal { return Decimal{v: v, exp: exp} }
-
-// Parts returns the v and exp d is v·10^exp of, as [MakeDecimal] takes them.
-func (d Decimal) Parts() (v uint64, exp int8) { return d.v, d.exp }
 
 // ParseDecimal parses decimal text such as "1185.50" exactly, keeping every digit:
 // MakeDecimal(118550, -2). The exponent is that of the last digit but at most 0, so
-// "1.5e3" is MakeDecimal(1500, 0). An error on syntax as in [ParseAmount], or if
-// negative, past 2^64-1, or the exponent would pass an int8.
+// "1.5e3" is MakeDecimal(1500, 0). An error on anything but an optional sign, digits
+// with at most one point, and an optional e or E exponent, or if negative, past
+// 2^64-1, or the exponent would pass an int8.
 func ParseDecimal(b []byte) (Decimal, error) {
 	e, err := fixed.Exp(b)
 	switch {
@@ -114,13 +117,17 @@ func ParseDecimal(b []byte) (Decimal, error) {
 	if err != 0 {
 		return Decimal{}, err
 	}
-	return Decimal{v: v, exp: exp}, nil
+	return Decimal{V: v, Exp: exp}, nil
 }
 
-// StringAppend appends d to dst with all its digits: MakeDecimal(118550, -2) is
-// "1185.50". [ParseDecimal] inverts it.
-func (d Decimal) StringAppend(dst []byte) []byte {
-	return fixed.Append(dst, d.v, d.exp, false)
+// AppendFormat appends d to dst with all its digits, written as g says:
+// MakeDecimal(123456, -2) is "1.234,56" for es-AR.
+func (d Decimal) AppendFormat(dst []byte, g Grouping) []byte {
+	return fixed.Append(dst, d.V, d.Exp, false, g.Group, g.Point)
 }
+
+// StringAppend appends d to dst with all its digits and no grouping:
+// MakeDecimal(118550, -2) is "1185.50". [ParseDecimal] inverts it.
+func (d Decimal) StringAppend(dst []byte) []byte { return d.AppendFormat(dst, Grouping{}) }
 
 func (d Decimal) String() string { return string(d.StringAppend(nil)) }

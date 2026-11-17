@@ -58,7 +58,7 @@ func (c Currency) find() *entry {
 	return &table[i]
 }
 
-// ParseTicker parses the string as a ticker and returns currency e.g: "ARS", "USD", "JPY".
+// ParseTicker parses the string as a ticker and returns currencys e.g: "ARS", "USD", "JPY".
 // returns false if none found.
 func ParseTicker(s string) (Currency, bool) {
 	for i := range table {

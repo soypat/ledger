@@ -7,41 +7,6 @@ import (
 	"github.com/soypat/ledger/internal/fixed"
 )
 
-// cur is a caller-defined currency set, valued by ISO 4217 numeric code.
-type cur uint32
-
-const (
-	ars cur = 32
-	bhd cur = 48
-	jpy cur = 392
-	usd cur = 840
-)
-
-var curs = []cur{ars, bhd, jpy, usd}
-
-func (c cur) Exp() int8 {
-	switch c {
-	case jpy:
-		return 0
-	case bhd:
-		return -3
-	}
-	return -2
-}
-
-func (c cur) Ticker() string {
-	switch c {
-	case ars:
-		return "ARS"
-	case bhd:
-		return "BHD"
-	case jpy:
-		return "JPY"
-	case usd:
-		return "USD"
-	}
-	return "???"
-}
 func mustPanic(t *testing.T, name string, f func()) {
 	t.Helper()
 	defer func() {
@@ -118,5 +83,21 @@ func TestDecimal(t *testing.T) {
 	}
 	if a, b := MakeDecimal(11855, -1), MakeDecimal(118550, -2); a == b {
 		t.Errorf("%v == %v; == compares digits, not values", a, b)
+	}
+	// fixed tests the grouping rule; these check Decimal passes Grouping through.
+	formats := []struct {
+		d    Decimal
+		g    Grouping
+		want string
+	}{
+		{MakeDecimal(123456, -2), Grouping{Group: '.', Point: ','}, "1.234,56"},
+		{MakeDecimal(84388, -8), Grouping{Group: '.', Point: ','}, "0,00084388"},
+		{MakeDecimal(1234567, 0), Grouping{Group: '\''}, "1'234'567"},
+		{MakeDecimal(123456, -2), Grouping{}, "1234.56"},
+	}
+	for _, c := range formats {
+		if got := string(c.d.AppendFormat(nil, c.g)); got != c.want {
+			t.Errorf("%v.AppendFormat(%+v) = %q; want %q", c.d, c.g, got, c.want)
+		}
 	}
 }

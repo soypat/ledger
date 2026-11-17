@@ -37,7 +37,7 @@ func (a Amount[C]) IsValid() bool { return a.ok }
 // Decimal returns a in major units: 12037 minor ARS is 120.37. Like Minor, it is 0 if
 // a is invalid.
 func (a Amount[C]) Decimal() Decimal {
-	return Decimal{v: a.Minor(), exp: a.c.Exp()}
+	return Decimal{V: a.Minor(), Exp: a.c.Exp()}
 }
 
 // FromFloat returns v major units of c, for amounts written as source literals:
@@ -93,15 +93,19 @@ func (a Amount[C]) sameCurrency(b Amount[C], op string) {
 	}
 }
 
-// StringAppend appends a as its major units and ticker, "120.37 ARS", with every minor
-// digit as AppendAmount writes them. ParseAmount reads the number back.
-func (a Amount[C]) StringAppend(dst []byte) []byte {
+// AppendFormat appends a as its major units, with every minor digit and written as g
+// says, then its ticker: "1.234,56 ARS" for es-AR. An invalid a is "invalid amount".
+func (a Amount[C]) AppendFormat(dst []byte, g Grouping) []byte {
 	if !a.ok {
 		return append(dst, "invalid amount"...)
 	}
-	dst = fixed.Append(dst, a.v, a.c.Exp(), false)
+	dst = a.Decimal().AppendFormat(dst, g)
 	dst = append(dst, ' ')
 	return append(dst, a.c.Ticker()...)
 }
+
+// StringAppend appends a as its major units, with every minor digit and no grouping,
+// then its ticker: "120.37 ARS". [ParseDecimal] reads the number back as a.Decimal().
+func (a Amount[C]) StringAppend(dst []byte) []byte { return a.AppendFormat(dst, Grouping{}) }
 
 func (a Amount[C]) String() string { return string(a.StringAppend(nil)) }

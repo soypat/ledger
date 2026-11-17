@@ -86,7 +86,7 @@ func ParseRate(b []byte) (Rate, error) {
 
 // StringAppend appends r as a percentage, "21%", to dst. [ParseRate] inverts it.
 func (r Rate) StringAppend(dst []byte) []byte {
-	return append(fixed.Append(dst, uint64(r), -4, true), '%')
+	return append(fixed.Append(dst, uint64(r), -4, true, 0, 0), '%')
 }
 
 func (r Rate) String() string { return string(r.StringAppend(nil)) }

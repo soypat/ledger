@@ -20,16 +20,16 @@ type Quote[C Currency] struct {
 // major unit of from. An error if p is zero, or with the currencies' exponents it
 // passes what a ratio of uint64 holds.
 func NewQuote[C Currency](from, to C, p Decimal) (Quote[C], error) {
-	if p.v == 0 {
+	if p.V == 0 {
 		return Quote[C]{}, fixed.ErrRange
 	}
-	q := Quote[C]{from: from, to: to, price: p, num: p.v, den: 1}
+	q := Quote[C]{from: from, to: to, price: p, num: p.V, den: 1}
 	// v minor From is v·10^from.Exp major From, worth v·p.v·10^(from.Exp+p.exp) major To,
 	// which is v·p.v·10^k minor To.
-	k := int(from.Exp()) + int(p.exp) - int(to.Exp())
+	k := int(from.Exp()) + int(p.Exp) - int(to.Exp())
 	if k >= 0 {
 		m, ok := fixed.Pow10(k)
-		hi, lo := bits.Mul64(p.v, m)
+		hi, lo := bits.Mul64(p.V, m)
 		if !ok || hi != 0 {
 			return Quote[C]{}, fixed.ErrRange
 		}

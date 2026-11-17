@@ -174,8 +174,50 @@ func Parse(b []byte, exp int8, mode Round) (uint64, Err) {
 
 // Append appends u·10^exp in decimal to dst: 123456 at exp -2 is "1234.56". With trim,
 // trailing fractional zeros and a bare point are dropped ("1234.5", "12"); without, the
-// fraction always has -exp digits ("1234.50", "12.00"). [Parse] at exp inverts it.
-func Append(dst []byte, u uint64, exp int8, trim bool) []byte {
+// fraction always has -exp digits ("1234.50", "12.00"). For display, a nonzero point
+// replaces '.' and a nonzero group goes between every three integer digits: with group
+// '.' and point ',' 123456 at exp -2 is "1.234,56". With both zero, [Parse] at exp
+// inverts it.
+func Append(dst []byte, u uint64, exp int8, trim bool, group, point byte) []byte {
+	start := len(dst)
+	dst = appendPlain(dst, u, exp, trim)
+	if group == 0 && point == 0 {
+		return dst
+	}
+	return regroup(dst, start, group, point)
+}
+
+// regroup rewrites the plain decimal dst[start:] in place for display: point for '.'
+// unless 0, and group before every third integer digit counted from the point unless 0.
+func regroup(dst []byte, start int, group, point byte) []byte {
+	p := start // index of the point, or of the end if there is no fraction
+	for p < len(dst) && dst[p] != '.' {
+		p++
+	}
+	if p < len(dst) && point != 0 {
+		dst[p] = point
+	}
+	marks := (p - start - 1) / 3 // one between every three integer digits
+	if group == 0 || marks == 0 {
+		return dst
+	}
+	dst = append(dst, make([]byte, marks)...)  // grows dst without allocating a temporary
+	copy(dst[p+marks:], dst[p:len(dst)-marks]) // the fraction moves right
+	// Integer digits move right from the last one, a mark before every third. w stays
+	// ahead of r by the marks still to place, so no digit is overwritten unread.
+	for r, w, n := p, p+marks, 0; w > r; n++ {
+		if n > 0 && n%3 == 0 {
+			w--
+			dst[w] = group
+		}
+		r--
+		w--
+		dst[w] = dst[r]
+	}
+	return dst
+}
+
+func appendPlain(dst []byte, u uint64, exp int8, trim bool) []byte {
 	if exp >= 0 {
 		dst = strconv.AppendUint(dst, u, 10)
 		if u != 0 {

@@ -165,7 +165,7 @@ func TestExchangeRace(t *testing.T) {
 	for i := range quotes {
 		zeros := i % 3
 		v := uint64(1000+i) * [3]uint64{1, 10, 100}[zeros]
-		q, err := NewQuote(usd, ars, Decimal{v: v, exp: int8(-zeros)})
+		q, err := NewQuote(usd, ars, Decimal{V: v, Exp: int8(-zeros)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,4 +219,11 @@ func validConvert(quotes []Quote[cur], q Quote[cur], got uint64) bool {
 		found = found || s == q
 	}
 	return found && got >= 1000 && got < 1000+uint64(len(quotes))
+}
+
+func MakeDecimal(v uint64, exp int8) Decimal {
+	return Decimal{V: v, Exp: exp}
+}
+func (d Decimal) Parts() (uint64, int8) {
+	return d.V, d.Exp
 }

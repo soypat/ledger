@@ -1,8 +1,10 @@
 package fixed
 
 import (
+	"bytes"
 	"math"
 	"math/rand/v2"
+	"strconv"
 	"testing"
 )
 
@@ -255,13 +257,95 @@ func TestAppend(t *testing.T) {
 		{5, 2, false, "500"},
 	}
 	for _, c := range cases {
-		if got := string(Append(nil, c.u, c.exp, c.trim)); got != c.want {
+		if got := string(Append(nil, c.u, c.exp, c.trim, 0, 0)); got != c.want {
 			t.Errorf("Append(%d, %d, %v) = %q; want %q", c.u, c.exp, c.trim, got, c.want)
 		}
 	}
-	if got := string(Append([]byte("$"), 250, -2, true)); got != "$2.5" {
+	if got := string(Append([]byte("$"), 250, -2, true, 0, 0)); got != "$2.5" {
 		t.Errorf("Append onto a prefix = %q", got)
 	}
+}
+
+// TestAppendGrouped checks group and point against what they promise: the digits of
+// plain Append, with point for '.' and group before every third integer digit. Each
+// case is derived from the plain text, never pinned.
+func TestAppendGrouped(t *testing.T) {
+	type marks struct{ group, point byte }
+	all := []marks{{0, 0}, {'.', ','}, {',', '.'}, {' ', 0}, {0, ','}, {'\'', 0}}
+	exps := []int8{0, -1, -2, -3, -4, -9, -19, -20, -25, 2}
+	values := []uint64{0, 1, 9, 10, 99, 100, 999, 1000, 1001, 999_999, 1_000_000, 123_456,
+		1234_567_890, 1<<32 - 1, 1 << 32, 1<<63 - 1, 1 << 63, math.MaxUint64 - 1, math.MaxUint64}
+	check := func(u uint64, exp int8, trim bool, m marks) {
+		t.Helper()
+		prefix := []byte("x=")
+		got := Append(prefix, u, exp, trim, m.group, m.point)
+		if !bytes.HasPrefix(got, prefix) {
+			t.Fatalf("Append(%d, %d, %v, %q, %q) = %q: dst prefix lost", u, exp, trim, m.group, m.point, got)
+		}
+		got = got[len(prefix):]
+		plain := Append(nil, u, exp, trim, 0, 0)
+		if want := grouped(plain, m.group, m.point); !bytes.Equal(got, want) {
+			t.Errorf("Append(%d, %d, %v, %q, %q) = %q; the grouping rule gives %q", u, exp, trim, m.group, m.point, got, want)
+		}
+		if back := ungrouped(got, m.group, m.point); !bytes.Equal(back, plain) {
+			t.Errorf("Append(%d, %d, %v, %q, %q) = %q: ungrouped %q, plain %q", u, exp, trim, m.group, m.point, got, back, plain)
+		}
+	}
+	for _, m := range all {
+		for _, exp := range exps {
+			for _, u := range values {
+				check(u, exp, false, m)
+				check(u, exp, true, m)
+			}
+		}
+	}
+	rng := rand.New(rand.NewPCG(21, 22))
+	for range 5000 {
+		check(rng.Uint64()>>rng.IntN(64), int8(-rng.IntN(22)), rng.IntN(2) == 0, all[rng.IntN(len(all))])
+	}
+	// The marks alone: at exp 0 the text is the digits of u, whose count fixes the marks.
+	for _, u := range []uint64{0, 1, 999, 1000, 999_999, 1_000_000, math.MaxUint64} {
+		got := Append(nil, u, 0, false, '\'', 0)
+		digits := len(strconv.FormatUint(u, 10))
+		if n := bytes.Count(got, []byte{'\''}); n != (digits-1)/3 || len(got) != digits+n {
+			t.Errorf("Append(%d, 0, '\\'') = %q: %d marks for %d digits", u, got, n, digits)
+		}
+	}
+}
+
+// grouped applies the rule to plain text: point for '.' unless 0, and group before
+// every third integer digit counted from the point, never before the first, unless 0.
+func grouped(plain []byte, group, point byte) []byte {
+	intPart, frac, hasPoint := bytes.Cut(plain, []byte{'.'})
+	var out []byte
+	for i, c := range intPart {
+		if group != 0 && i > 0 && (len(intPart)-i)%3 == 0 {
+			out = append(out, group)
+		}
+		out = append(out, c)
+	}
+	if hasPoint {
+		if point == 0 {
+			point = '.'
+		}
+		out = append(append(out, point), frac...)
+	}
+	return out
+}
+
+// ungrouped inverts grouped: group marks dropped, point back to '.'.
+func ungrouped(text []byte, group, point byte) []byte {
+	var out []byte
+	for _, c := range text {
+		switch {
+		case group != 0 && c == group:
+		case point != 0 && c == point:
+			out = append(out, '.')
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func TestRoundTrip(t *testing.T) {
@@ -274,7 +358,7 @@ func TestRoundTrip(t *testing.T) {
 		}
 		exp := int8(rng.IntN(32) - 25) // -25 through 6
 		trim := rng.IntN(2) == 0
-		buf = Append(buf[:0], u, exp, trim)
+		buf = Append(buf[:0], u, exp, trim, 0, 0)
 		q, err := Parse(buf, exp, RoundExact)
 		if q != u || err != 0 {
 			t.Fatalf("Parse(Append(%d, %d, %v) = %q) = %d, %v", u, exp, trim, buf, q, err)
@@ -291,7 +375,10 @@ func TestAllocs(t *testing.T) {
 	if n := testing.AllocsPerRun(100, func() { Parse(b, -2, RoundExact) }); n != 0 {
 		t.Errorf("Parse failing allocates %v times", n)
 	}
-	if n := testing.AllocsPerRun(100, func() { Append(dst[:0], math.MaxUint64, -7, false) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { Append(dst[:0], math.MaxUint64, -7, false, 0, 0) }); n != 0 {
 		t.Errorf("Append allocates %v times", n)
+	}
+	if n := testing.AllocsPerRun(100, func() { Append(dst[:0], math.MaxUint64, -2, false, '.', ',') }); n != 0 {
+		t.Errorf("Append grouped allocates %v times", n)
 	}
 }

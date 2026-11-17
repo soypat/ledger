@@ -42,7 +42,6 @@ func (c cur) Ticker() string {
 	}
 	return "???"
 }
-
 func TestFromFloat(t *testing.T) {
 	cases := []struct {
 		c    cur
@@ -151,9 +150,31 @@ func TestAmountString(t *testing.T) {
 		if got := c.a.String(); got != c.want {
 			t.Errorf("%+v.String() = %q; want %q", c.a, got, c.want)
 		}
-		got, err := fixed.Parse([]byte(c.want[:len(c.want)-4]), c.a.Currency().Exp(), RoundExact)
-		if err != 0 || got != c.a.Minor() {
-			t.Errorf("ParseAmount(%q) = %d, %v; want %d", c.want[:len(c.want)-4], got, err, c.a.Minor())
+		num := c.want[:len(c.want)-4]
+		if got, err := ParseDecimal([]byte(num)); err != nil || got != c.a.Decimal() {
+			t.Errorf("ParseDecimal(%q) = %v, %v; want %v", num, got, err, c.a.Decimal())
 		}
+	}
+	esAR := Grouping{Group: '.', Point: ','}
+	formats := []struct {
+		a    Amount[cur]
+		g    Grouping
+		want string
+	}{
+		{FromMinor(ars, 123456), esAR, "1.234,56 ARS"},
+		{FromMinor(usd, 123456789), Grouping{Group: ',', Point: '.'}, "1,234,567.89 USD"},
+		{FromMinor(jpy, 1500), esAR, "1.500 JPY"},
+		{FromMinor(ars, 12037), Grouping{}, "120.37 ARS"},
+		{Sub(FromMinor(ars, 1), FromMinor(ars, 2)), esAR, "invalid amount"},
+	}
+	for _, c := range formats {
+		if got := string(c.a.AppendFormat([]byte("x="), c.g)); got != "x="+c.want {
+			t.Errorf("%v.AppendFormat(%+v) = %q; want %q", c.a, c.g, got, "x="+c.want)
+		}
+	}
+	dst := make([]byte, 0, 64)
+	big := FromMinor(ars, math.MaxUint64)
+	if n := testing.AllocsPerRun(100, func() { big.AppendFormat(dst[:0], esAR) }); n != 0 {
+		t.Errorf("AppendFormat allocates %v times", n)
 	}
 }
